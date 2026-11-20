@@ -124,12 +124,15 @@ through Hex's control command (without `--force`); active recording can refuse.
 It backs up the full `hex` data folder and `~/.config/hex` under
 `~/Library/Application Support/Hex Local Backups/` before launching.
 
-It installs to `/Applications/Hex Local-<commit>.app`, refuses to overwrite
-any existing destination, verifies its signature again, registers it with
-Launch Services, and launches it. `/Applications/Hex.app` stays intact. The
+It installs to the stable path `/Applications/Hex Local.app`, verifies the
+staged signature again, and saves any existing local bundle in the data
+backup before replacing it. A failed move restores that previous bundle.
+It registers the app with Launch Services and launches it. `/Applications/Hex.app` stays intact. The
 new copy deliberately keeps upstream's bundle ID and data paths so settings,
 history, models, and config persist; run one copy at a time. A new signing
-identity may require fresh macOS permissions. Launch at login is controlled
+identity may require fresh macOS permissions. Future installs reuse the same
+path, bundle ID, and Developer ID team; the commit is only a build label,
+not a new app identity. Launch at login is controlled
 in the UI, through macOS; verify it points to your chosen local copy.
 
 Open Settings and verify the footer says **Local build · updates off** and
@@ -150,7 +153,7 @@ in-place continuation of your existing settings/history.
 
 After verifying dictation, settings, history, and login behavior, older
 bundles are deletion candidates: move the **app bundles only** to Trash in
-Finder. Keep the current `Hex Local-<commit>.app`, the `hex` data folder,
+Finder. Keep the current `Hex Local.app`, the `hex` data folder,
 `~/.config/hex`, and backups. To roll back, quit the local app and open the
 old bundle; if data migration requires restoring a snapshot, preserve the
 current data separately first. Restoring an older snapshot loses changes

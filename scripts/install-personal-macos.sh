@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build a committed local app; never replace another installed bundle.
+# Build a committed local app; keep the previous local bundle for rollback.
 set -euo pipefail
 umask 077
 cd "$(dirname "$0")/.."
@@ -13,10 +13,15 @@ cd "$(dirname "$0")/.."
 . scripts/macos-signing.sh
 hex_codesign_identity "$HEX_TEAM_ID" >/dev/null
 commit=$(git rev-parse --short=12 HEAD)
-destination="/Applications/Hex Local-$commit.app"
-[[ ! -e "$destination" && ! -L "$destination" ]] || {
-  echo "Already exists; refusing to overwrite: $destination" >&2; exit 1;
-}
+destination='/Applications/Hex Local.app'
+if [[ -e "$destination" || -L "$destination" ]]; then
+  [[ ! -L "$destination" ]]
+  codesign --verify --deep --strict "$destination"
+  signature=$(codesign -dv --verbose=4 "$destination" 2>&1)
+  [[ "$signature" == *"TeamIdentifier=$HEX_TEAM_ID"* ]] || {
+    echo 'Existing Hex Local.app belongs to another signing team; leaving it intact.' >&2; exit 1;
+  }
+fi
 # These select distribution or isolated test builds instead of our local app.
 unset HEX_TEST_BUILD HEX_RELEASE_UNSIGNED HEX_BUILD_CHANNEL HEX_VERSION HEX_BUILD_NUMBER
 unset HEX_APPLICATION_SUPPORT_DIR CARGO_TARGET_DIR
@@ -32,6 +37,10 @@ binary="$bundle/Contents/MacOS/hex"
 [[ $("$binary" --version) == "hex $version" ]]
 HEX_APPLICATION_SUPPORT_DIR="$temporary/data" "$binary" history --json > "$temporary/history.json"
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["entries"] == []' "$temporary/history.json"
+staging=$(mktemp -d /Applications/.Hex-Local-install.XXXXXX)
+trap 'rm -rf "$temporary" "$staging"' EXIT
+ditto "$bundle" "$staging/Hex.app"
+codesign --verify --deep --strict "$staging/Hex.app"
 # A refused quit (for example, an active recording) aborts installation.
 if "$binary" status --json > "$temporary/status.json" 2>/dev/null; then
   pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$temporary/status.json")
@@ -53,11 +62,13 @@ fi
 if [[ -d "$HOME/.config/hex" ]]; then
   ditto "$HOME/.config/hex" "$backup/config"
 fi
-staging=$(mktemp -d /Applications/.Hex-Local-install.XXXXXX)
-trap 'rm -rf "$temporary" "$staging"' EXIT
-ditto "$bundle" "$staging/Hex.app"
-codesign --verify --deep --strict "$staging/Hex.app"
-mv "$staging/Hex.app" "$destination"
+if [[ -e "$destination" ]]; then
+  mv "$destination" "$backup/Hex Local.app"
+fi
+if ! mv "$staging/Hex.app" "$destination"; then
+  [[ ! -e "$backup/Hex Local.app" ]] || mv "$backup/Hex Local.app" "$destination"
+  exit 1
+fi
 '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister' -f "$destination"
 open "$destination"
 printf 'Installed: %s\nData backup: %s\n' "$destination" "$backup"
