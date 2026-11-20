@@ -55,7 +55,7 @@ quit; report that and leave it running. Keep signing credentials in the
 keychain. If signing, permission, build, or launch fails, retain the old app
 and report the concrete blocker; preserve platform security checks.
 
-Verify the process executable is the new `/Applications/Hex Local-<commit>.app`,
+Verify the process executable is `/Applications/Hex Local.app/Contents/MacOS/hex`,
 the app reports local-build mode with updates off, and settings/history are
 still available. Record the installed commit, backup path, test results,
 and older app bundles eligible for deletion. Flag those bundles for the
