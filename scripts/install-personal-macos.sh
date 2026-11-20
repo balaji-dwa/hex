@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build a committed local app; keep the previous local bundle for rollback.
+# Build a committed local app; keep only the verified installation outside Trash.
 set -euo pipefail
 umask 077
 cd "$(dirname "$0")/.."
@@ -70,6 +70,34 @@ if ! mv "$staging/Hex.app" "$destination"; then
   exit 1
 fi
 '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister' -f "$destination"
-open "$destination"
+"$destination/Contents/MacOS/hex" start
+"$destination/Contents/MacOS/hex" status --json > "$temporary/installed-status.json"
+python3 - "$temporary/installed-status.json" "$destination/Contents/MacOS/hex" <<'PY'
+import json, subprocess, sys
+status = json.load(open(sys.argv[1]))
+actual = subprocess.check_output(['ps', '-p', str(status['pid']), '-o', 'args='], text=True).strip()
+assert actual == sys.argv[2], f'Unexpected running app: {actual}'
+PY
+# Only a successful launch retires the old app and the packaged development copy.
+swift - "$destination" "$bundle" "$backup/Hex Local.app" <<'SWIFT'
+import Foundation
+let keep = URL(fileURLWithPath: CommandLine.arguments[1]).resolvingSymlinksInPath()
+for path in CommandLine.arguments.dropFirst(2) {
+  guard FileManager.default.fileExists(atPath: path) else { continue }
+  let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+  precondition(url != keep && url.pathExtension == "app")
+  let data = try Data(contentsOf: url.appendingPathComponent("Contents/Info.plist"))
+  let info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+  precondition(info?["CFBundleIdentifier"] as? String == "anomaly.hex")
+  let unregister = Process()
+  unregister.executableURL = URL(fileURLWithPath: "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+  unregister.arguments = ["-u", path]
+  try unregister.run()
+  unregister.waitUntilExit()
+  try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+  precondition(!FileManager.default.fileExists(atPath: path))
+  print("Moved to Trash: \(path)")
+}
+SWIFT
 printf 'Installed: %s\nData backup: %s\n' "$destination" "$backup"
-echo 'Older Hex bundles can be moved to Trash after verifying this copy in Settings.'
+echo 'Verified the running app; previous and packaged development apps are in Trash.'

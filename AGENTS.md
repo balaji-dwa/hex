@@ -1,6 +1,14 @@
 <!-- tallow -->
 # Hex Agent Guide
 
+## Personal installation
+
+After updates or development runs, keep only `/Applications/Hex Local.app`.
+Verify that exact app is running before unregistering and moving all other
+Hex app bundles, including packaged development and app-backup copies, to
+macOS Trash. Preserve settings, history, models, data backups, and build caches.
+Follow [`docs/personal-fork.md`](docs/personal-fork.md) for installation and cleanup.
+
 ## Private Kit Tool
 
 `dev` and `production` take changes only through pull requests (Dax's
