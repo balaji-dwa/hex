@@ -370,6 +370,66 @@ fn planner_uses_eastern_six_am_in_winter_summer_and_daylight_saving_transitions(
     }
 }
 
+#[test]
+fn planner_saved_answers_wrap_within_the_content_column() {
+    let answer = format!(
+        "{} https://example.com/{}",
+        "Make steady progress on the most important work this week. ".repeat(6),
+        "a".repeat(160)
+    );
+    for width in [640., 1024.] {
+        for slide in [
+            Slide::Picture,
+            Slide::Progress,
+            Slide::Yesterday,
+            Slide::Breakdown,
+        ] {
+            let mut state = fixture(slide);
+            let week = state.ledger.weeks.last_mut().unwrap();
+            week.goal = answer.clone();
+            week.focus = answer.clone();
+            week.remaining = answer.clone();
+            week.success = answer.clone();
+            state.ledger.days[0].deliverable = answer.clone();
+            state.ledger.days[0].criteria = answer.clone();
+            state.fields[1] = TextEdit::new(&answer);
+            let text = TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
+            let mut rt = super::super::offscreen::runtime(
+                state,
+                view::view,
+                (width, 768.),
+                Env {
+                    scale: 1.,
+                    system_dark: true,
+                },
+                text,
+            );
+            rt.frame(0.);
+            let elements = rt.elements();
+            let column = elements
+                .iter()
+                .find(|e| e.key.as_deref() == Some("planner-content"))
+                .unwrap();
+            let answers: Vec<_> = elements
+                .iter()
+                .filter(|e| e.text.as_deref().is_some_and(|t| t.contains(&answer)))
+                .collect();
+            assert!(!answers.is_empty(), "{slide:?}");
+            for value in answers {
+                assert!(
+                    value.rect[3] > 40.,
+                    "{slide:?}: saved answer must wrap: {:?}",
+                    value.rect
+                );
+                assert!(
+                    value.rect[0] + value.rect[2] <= column.rect[0] + column.rect[2] + 1.,
+                    "{slide:?}: answer overflows the column"
+                );
+            }
+        }
+    }
+}
+
 fn fixture(slide: Slide) -> Planner {
     let mut ledger = Ledger::default();
     let week = model::Week {
@@ -435,6 +495,9 @@ fn fixture(slide: Slide) -> Planner {
         ],
         ..Default::default()
     });
+    if slide == Slide::Picture {
+        ledger.weeks.last_mut().unwrap().goal = "Build a calm and dependable voice workspace that makes room for deliberate planning, keeps the larger goals visible, and turns each morning's focus into small steps with a clear finish.".into();
+    }
     let mut state = Planner::new(ledger, 20_777, None);
     state.slide = slide;
     state

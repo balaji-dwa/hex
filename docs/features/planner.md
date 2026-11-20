@@ -57,6 +57,9 @@ checks the entire plan, not just the visible slide. The previous deliverable
 needs an explicit Yes / Not yet when there is a previous plan. A checklist
 entry waiting for Add must be added or cleared before leaving that slide.
 
+Saved answers wrap within the content column, including long words and links.
+`planner_saved_answers_wrap_within_the_content_column` covers long summaries,
+yesterday's deliverable/criteria, and the pinned focus at two viewport widths.
 Each open-ended question has its own slide with a large text area. Word-count
 labels and slide numbers are hidden; the minimum is explained only on an
 invalid submission. The header has icon-only previous/next arrows before Daily / Weekly; each question is its own title.

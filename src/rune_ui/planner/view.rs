@@ -42,7 +42,11 @@ fn action(
 }
 
 fn copy(key: &str, value: impl Into<String>, p: Paint) -> El {
-    text(value.into()).key(key).font(p.k.ty.ui).color(p.text())
+    text(value.into())
+        .key(key)
+        .font(p.k.ty.ui)
+        .color(p.text())
+        .wrap_anywhere()
 }
 
 fn field(planner: &Planner, index: usize, label: &str, p: Paint) -> El {
