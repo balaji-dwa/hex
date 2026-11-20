@@ -111,5 +111,6 @@ for path in CommandLine.arguments.dropFirst(2) {
   print("Moved to Trash: \(path)")
 }
 SWIFT
+'/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister' -f "$destination"
 printf 'Installed: %s\nData backup: %s\n' "$destination" "$backup"
 echo 'Verified the running app; previous and packaged development apps are in Trash.'
