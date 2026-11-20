@@ -71,7 +71,19 @@ if ! mv "$staging/Hex.app" "$destination"; then
 fi
 '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister' -f "$destination"
 "$destination/Contents/MacOS/hex" start
-"$destination/Contents/MacOS/hex" status --json > "$temporary/installed-status.json"
+# Launch discovery can precede the control endpoint becoming ready.
+ready=0
+for ((attempt=0; attempt<20; attempt++)); do
+  if "$destination/Contents/MacOS/hex" status --json > "$temporary/installed-status.json"; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$ready" != 1 ]]; then
+  cat "$temporary/installed-status.json" >&2
+  exit 1
+fi
 python3 - "$temporary/installed-status.json" "$destination/Contents/MacOS/hex" <<'PY'
 import json, subprocess, sys
 status = json.load(open(sys.argv[1]))
