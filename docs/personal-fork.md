@@ -118,8 +118,8 @@ HEX_TEAM_ID=6823DZMTQD scripts/install-personal-macos.sh
 
 This runs relevant Labs/local-build/updater tests, builds through upstream's
 `scripts/build-app.sh` with locked dependencies and `HEX_LOCAL_BUILD=1`,
-validates the signed bundle through `scripts/validate-app.sh`, and renders a
-settings scene using a temporary data root. It asks the existing app to quit
+validates the signed bundle through `scripts/validate-app.sh`, and checks its
+version and empty History CLI using a temporary data root. It asks the existing app to quit
 through Hex's control command (without `--force`); active recording can refuse.
 It backs up the full `hex` data folder and `~/.config/hex` under
 `~/Library/Application Support/Hex Local Backups/` before launching.
