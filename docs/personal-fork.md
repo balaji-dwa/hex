@@ -125,11 +125,9 @@ It backs up the full `hex` data folder and `~/.config/hex` under
 `~/Library/Application Support/Hex Local Backups/` before launching.
 
 It installs to the stable path `/Applications/Hex Local.app`, verifies the
-staged signature again, and temporarily saves the existing local bundle in
-the data backup before replacing it. A failed move restores that previous
-bundle. It registers and launches the app, then verifies the running executable
-is exactly the stable installed path. Only after that passes does it unregister
-and move the previous app and packaged development copy to macOS Trash. The
+staged signature again, and saves any existing local bundle in the data
+backup before replacing it. A failed move restores that previous bundle.
+It registers the app with Launch Services and launches it. `/Applications/Hex.app` stays intact. The
 new copy deliberately keeps upstream's bundle ID and data paths so settings,
 history, models, and config persist; run one copy at a time. A new signing
 identity may require fresh macOS permissions. Future installs reuse the same
@@ -153,19 +151,14 @@ retrying. `HEX_TEST_BUILD=1 scripts/build-app.sh` is upstream's ad-hoc signed
 alternative, but its separate `hex-test` data folder is unsuitable for this
 in-place continuation of your existing settings/history.
 
-Keep one installation: `/Applications/Hex Local.app`. The update routine also
-checks installed, build, output, and app-backup folders for extra Hex bundles,
-unregisters them, and moves the **app bundles only** to Trash, including
-temporary development apps once their verification is finished. It verifies
-quit/reopen resolves to the surviving local app. This policy also applies when
-upstream has no new update. Data backups stay intact.
-
-Keep the `hex` data folder, `~/.config/hex`, and data backups. For rollback,
-quit the app, restore the desired previous app from Trash, and replace the
-current local app intentionally so only one copy remains installed. If data
-migration requires restoring a snapshot, preserve the current data separately
-first. Restoring an older snapshot loses changes since that snapshot. Neither
-the installer nor the routine empties Trash or deletes user data.
+After verifying dictation, settings, history, and login behavior, older
+bundles are deletion candidates: move the **app bundles only** to Trash in
+Finder. Keep the current `Hex Local.app`, the `hex` data folder,
+`~/.config/hex`, and backups. To roll back, quit the local app and open the
+old bundle; if data migration requires restoring a snapshot, preserve the
+current data separately first. Restoring an older snapshot loses changes
+since that snapshot. Neither the installer nor the routine deletes
+old apps or data.
 
 ## Propose a feature upstream
 
