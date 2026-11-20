@@ -57,26 +57,10 @@ and report the concrete blocker; preserve platform security checks.
 
 Verify the process executable is `/Applications/Hex Local.app/Contents/MacOS/hex`,
 the app reports local-build mode with updates off, and settings/history are
-still available. Keep exactly one installation: `/Applications/Hex Local.app`.
-The installer verifies the running executable before unregistering and moving
-its previous app and packaged development copy to macOS Trash. Retain data
-backups, settings, history, models, and source/build caches.
-
-Before finishing any update or development session, including a no-update
-run, check for other Hex app bundles in `/Applications`, `~/Applications`,
-the project's `target/app`, and the user's Hex/Codex output and app-backup
-folders (Spotlight can locate additional copies). Confirm each candidate's
-bundle ID belongs to Hex, exclude the current installation and Trash, and
-unregister and move the other app bundles to Trash through macOS's native
-file API. Stop any development app through its ordinary quit first; respect
-active recordings. Re-register the surviving local app and verify that
-quitting and reopening by bundle ID starts that exact path. This cleanup is
-authorized by the user's standing single-installation preference. Never
-empty Trash or delete the accompanying user data.
-
-Record the installed commit, data-backup path, tests, and retired app copies.
-A failed install or cleanup is partial completion; report its blocker rather
-than claiming only one installation remains.
+still available. Record the installed commit, backup path, test results,
+and retired app bundles.
+After updates, installs, or development runs, keep only `/Applications/Hex Local.app` and move other Hex app bundles to Trash; preserve user data and data backups. A source-only update with a failed install is
+partial completion, and must be reported that way.
 
 Remove only the disposable worktree and your lock, keeping any failure PR
 branch for review. Report new changes, a completed install, or a blocker;
