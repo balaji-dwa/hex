@@ -519,6 +519,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool
             },
         )
     };
+    let planner = crate::rune_ui::planner::macos::install(&mut app);
     let hud = crate::rune_hud::install(&mut app);
     crate::rune_ui::live_text::install(&mut app, crate::rune_hud::live_text_place);
     #[cfg(hex_capture)]
@@ -552,6 +553,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool
     let pump = Pump {
         window: window.clone(),
         capsules,
+        planner,
         #[cfg(hex_capture)]
         capture_overlays,
         runtime: handle,
@@ -656,6 +658,7 @@ static DRAIN: crate::desktop::process_exit::Drain = crate::desktop::process_exit
 // Main thread: status item, menu, reopen, HUD
 
 struct Pump {
+    planner: crate::rune_ui::planner::macos::Driver,
     window: rune::AppHandle<Ui>,
     capsules: crate::rune_ui::meeting_capsules::MeetingCapsules,
     #[cfg(hex_capture)]
@@ -862,6 +865,9 @@ impl Pump {
                 tracing::warn!(error = %format!("{error:#}"), "could not restart into the update");
             }
             None => {}
+        }
+        if let Some(published) = self.runtime.published() {
+            self.planner.tick(&published.settings);
         }
         while let Ok(event) = self.indicator_events.try_recv() {
             indicator.handle(event);

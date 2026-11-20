@@ -87,12 +87,16 @@ impl Feature {
             Self::ModesEditor => "Modes editor",
             Self::DropTranscribe => "Transcribe dropped audio",
             Self::PasteLastPicker => "Paste Last picker",
+            Self::Planner => "Planner",
         }
     }
 
     /// The card's one line, under its title.
     pub const fn summary(self) -> &'static str {
         match self {
+            Self::Planner => {
+                "Plan each morning at 6 AM Eastern and review your goals weekly. Enables Launch at login; emergency bypass lasts five minutes."
+            }
             Self::Meetings => "Record calls and keep a written copy",
             Self::VoiceFilter => "A Hex Microphone other apps can pick, with live voice filters",
             Self::Playground => "Browse scenes and stories in a window",

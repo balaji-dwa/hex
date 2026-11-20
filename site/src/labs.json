@@ -1,6 +1,17 @@
 {
   "labs": [
     {
+      "added": "2026-11-20",
+      "group": "history",
+      "groupTitle": "History",
+      "id": "planner",
+      "oses": [
+        "macos"
+      ],
+      "summary": "Plan each morning at 6 AM Eastern and review your goals weekly. Enables Launch at login; emergency bypass lasts five minutes.",
+      "title": "Planner"
+    },
+    {
       "added": "2026-10-30",
       "group": "meetings",
       "groupTitle": "Meetings",

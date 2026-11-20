@@ -117,6 +117,7 @@ impl Feature {
     /// Whether `settings` turn it on.
     pub fn on(self, settings: &AppSettings) -> bool {
         match self {
+            Self::Planner => settings.labs.planner,
             Self::Meetings => settings.meetings.enabled,
             Self::VoiceFilter => settings.experimental.hex_microphone,
             Self::Playground => settings.labs.playground,
@@ -204,6 +205,7 @@ impl Feature {
     pub fn switches(settings: &mut AppSettings) -> Vec<&mut bool> {
         let labs = &mut settings.labs;
         vec![
+            &mut labs.planner,
             &mut settings.meetings.enabled,
             &mut settings.experimental.hex_microphone,
             &mut settings.paste_with_shift,
@@ -293,6 +295,7 @@ impl Feature {
 
     pub fn set(self, settings: &mut AppSettings, on: bool) {
         match self {
+            Self::Planner => settings.labs.planner = on,
             Self::Meetings => settings.meetings.enabled = on,
             Self::VoiceFilter => settings.experimental.hex_microphone = on,
             Self::Playground => settings.labs.playground = on,

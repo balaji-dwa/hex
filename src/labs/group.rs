@@ -107,7 +107,8 @@ impl Feature {
             | Self::HistoryStats
             | Self::RecentDictations
             | Self::CopyDictationAudio
-            | Self::PasteLastPicker => Group::History,
+            | Self::PasteLastPicker
+            | Self::Planner => Group::History,
             Self::Meetings
             | Self::LiveChapters
             | Self::GnomeMeetingCapsules

@@ -89,13 +89,15 @@ impl Feature {
             | Self::CopyDictationAudio
             | Self::StopPhrase
             | Self::HoldThroughKeys
-            | Self::ModesEditor => Audience::Everyone,
+            | Self::ModesEditor
+            | Self::Planner => Audience::Everyone,
         }
     }
 
     /// The day it joined Labs, as `yyyymmdd`. Labs marks the newest as New.
     pub const fn added(self) -> u32 {
         match self {
+            Self::Planner => 20261120,
             Self::Meetings
             | Self::VoiceFilter
             | Self::Playground
@@ -276,7 +278,8 @@ impl Feature {
             | Self::MoreDictationShortcuts
             | Self::CalendarMenu
             | Self::CalendarSelectAll
-            | Self::PasteLastPicker => MACOS,
+            | Self::PasteLastPicker
+            | Self::Planner => MACOS,
             Self::CleanUpWithAppleIntelligence => MACOS,
             Self::CopyOnly => MACOS_WINDOWS,
             Self::HoldThroughKeys => MACOS_WINDOWS,
@@ -405,6 +408,7 @@ impl Feature {
             Self::HoldThroughKeys => "hold-through-keys",
             Self::ModesEditor => "modes-editor",
             Self::PasteLastPicker => "paste-last-picker",
+            Self::Planner => "planner",
         }
     }
 
@@ -480,6 +484,7 @@ impl Feature {
             Self::CopyCaptureZip => "labs.copy_capture_zip",
             Self::DropTranscribe => "labs.drop_transcribe",
             Self::PasteLastPicker => "labs.paste_last_picker",
+            Self::Planner => "labs.planner",
             Self::ShellCompletions => "labs.shell_completions",
             Self::YoloMode => "labs.yolo_mode",
             Self::CursorContext => "labs.cursor_context",

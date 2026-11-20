@@ -66,6 +66,7 @@ pub(super) enum Pane {
     /// Recorded calls and their settings, or the opt-in (macOS beta).
     Meetings,
     History,
+    Planner,
     /// The shots and recordings Labs › Screenshots saved (macOS, while
     /// it's on).
     #[cfg(hex_capture)]
@@ -93,6 +94,7 @@ impl Pane {
         Pane::Modes,
         Pane::Meetings,
         Pane::History,
+        Pane::Planner,
         #[cfg(hex_capture)]
         Pane::Captures,
         #[cfg(hex_capture)]
@@ -108,6 +110,7 @@ impl Pane {
             Pane::HudLab | Pane::Activity => false,
             // Labs › Modes editor; scenes render the pane without the lab.
             Pane::Modes => ui.settings.labs.modes_editor,
+            Pane::Planner => ui.platform.caps.os == platform::Os::Macos && ui.settings.labs.planner,
             Pane::Meetings => caps.meetings && meetings::available(ui),
             // On from Labs (dev builds), or while its driver is installed.
             Pane::VoiceFilter => caps.fun && fun::running(ui),
@@ -128,6 +131,7 @@ impl Pane {
             Pane::Output => tr("Output"),
             Pane::Modes => tr("Modes"),
             Pane::History => tr("History"),
+            Pane::Planner => tr("Planner"),
             #[cfg(hex_capture)]
             Pane::Captures => tr("Captures"),
             Pane::Meetings => tr("Meetings"),
@@ -146,6 +150,7 @@ impl Pane {
             Pane::Output => "nav-output",
             Pane::Modes => "nav-modes",
             Pane::History => "nav-history",
+            Pane::Planner => "nav-planner",
             #[cfg(hex_capture)]
             Pane::Captures => "nav-captures",
             Pane::Meetings => "nav-meetings",
@@ -164,6 +169,7 @@ impl Pane {
             Pane::Output => &OUTPUT_ICON,
             Pane::Modes => &MODES_ICON,
             Pane::History => &HISTORY_ICON,
+            Pane::Planner => &icons::PLAIN_BOOK,
             #[cfg(hex_capture)]
             Pane::Captures => &captures::CAPTURES_ICON,
             Pane::Meetings => &MEETINGS_ICON,

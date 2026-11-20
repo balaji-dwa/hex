@@ -5,6 +5,7 @@
 /// One Labs feature.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Feature {
+    Planner,
     Meetings,
     VoiceFilter,
     Playground,
@@ -87,7 +88,8 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Self; 79] = [
+    pub const ALL: [Self; 80] = [
+        Self::Planner,
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,

@@ -26,6 +26,11 @@ pub(super) const SCENES: &[Scene] = &[
         poll(ui, 0.0, &mut Tx::default());
     }),
     ("portal", |ui| *ui = portal_fixture()),
+    ("mac-planner", |ui| {
+        *ui = mac_fixture();
+        ui.settings.labs.planner = true;
+        ui.pane = Pane::Planner;
+    }),
     ("portal-mouse", |ui| {
         *ui = portal_fixture();
         ui.settings.dictation_hotkey = HotkeyBinding {

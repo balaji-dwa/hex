@@ -24,6 +24,7 @@ const LINUX_WINDOWS: &str = "Linux & Windows";
 /// name. The list follows this order. Every scene but `live` has one.
 const PATHS: &[(&str, &str)] = &[
     ("mac-settings", "Window/General/Settings"),
+    ("mac-planner", "Window/Planner"),
     ("mac-settings-sides", "Window/General/Left Option shortcut"),
     ("toggle-cancel", "Window/General/Toggle cancel shortcut"),
     (
@@ -706,6 +707,7 @@ mod tests {
     fn old_links_find_their_story() {
         for (old, new) in [
             ("mac-settings", "Window/General/Settings"),
+            ("mac-planner", "Window/Planner"),
             ("General/mac-settings", "Window/General/Settings"),
             ("general-mac-settings", "Window/General/Settings"),
             ("Meetings/meetings-calendar", "Window/Meetings/Calendar"),

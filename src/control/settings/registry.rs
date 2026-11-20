@@ -84,6 +84,11 @@ const MODEL_CHANGE: &str = "change the transcription model with `hex model use`"
 
 pub(super) const KEYS: &[Key] = &[
     key(
+        "labs.planner",
+        Kind::Bool,
+        "Labs: daily planning at 6 AM Eastern and weekly reviews (macOS)",
+    ),
+    key(
         "keyboard_model_switching.enabled",
         Kind::Bool,
         "Labs: switch the model when the keyboard input source changes (macOS, Windows, X11)",
