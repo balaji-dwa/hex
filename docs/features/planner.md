@@ -101,3 +101,12 @@ These checks do not establish real microphone transcription/paste, login
 after a real reboot, VoiceOver behavior, multiple physical monitors, or the
 ordering of real system dialogs. Native panels use floating levels rather
 than kiosk mode or keyboard event taps; OS shortcuts remain usable by design.
+
+Executed November 20, 2026: the macOS `scripts/check` run passed formatting,
+code shape, Nix pins, strict workspace Clippy, and 3,380 tests (34 opt-in
+checks skipped). After the final copy changes, all 20 Planner tests and
+strict all-target Clippy passed again. Linux's Rune UI suite passed 797
+checks (three skipped), the final Planner suite passed 19, and all nine
+existing golden-test groups passed against their files. The 28 new Planner
+renders and two updated Labs renders were inspected in both appearances.
+These are offscreen/test results, subject to the native proof limits above.

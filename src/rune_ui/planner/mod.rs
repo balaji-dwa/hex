@@ -44,7 +44,7 @@ impl Slide {
             Self::Focus => "What will you focus on this week?",
             Self::Success => "What would make this a good week?",
             Self::Picture => "Big picture",
-            Self::Yesterday => "Did it meet your criteria?",
+            Self::Yesterday => "Did you meet your criteria?",
             Self::YesterdayTasks => "Which steps did you finish?",
             Self::Today => "What are you tackling?",
             Self::Breakdown => "Break it down",

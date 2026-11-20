@@ -386,22 +386,18 @@ pub(super) fn view(planner: &Planner, cx: &mut Cx<Planner>) -> El {
         .py(16.)
         .center_y()
         .child(
-            text(if today_done && !planner.ledger.week_due(planner.date) {
-                "← → slides · Enter next · Esc close"
-            } else {
-                "← → slides · Enter next · Esc bypass 5 min"
-            })
-            .font(p.k.ty.small)
-            .color(p.muted())
-            .shrink()
-            .truncate(),
+            text("← → slides · Enter next")
+                .font(p.k.ty.small)
+                .color(p.muted())
+                .shrink()
+                .truncate(),
         )
         .child(el().grow(1.))
         .child(
             Button::new(if today_done && !planner.ledger.week_due(planner.date) {
-                "Close planner"
+                "Esc · Close planner"
             } else {
-                "Bypass · 5 min"
+                "Esc · Bypass · 5 min"
             })
             .variant(ButtonVariant::Ghost)
             .control_size(ControlSize::Small)
