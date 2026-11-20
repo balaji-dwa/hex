@@ -41,50 +41,48 @@ dependency bumps and unrelated refactors when adding a lab.
 
 ## Update the fork
 
-`Personal upstream sync` runs weekly on Monday at 09:53 UTC, and can be
-started manually:
+The **Update personal Hex** Codex routine runs in this project every Monday
+at **12:00 noon, America/New_York**, on this Mac. It invokes the project skill
+[update-hex](../.agents/skills/update-hex/SKILL.md); you can also invoke
+`$update-hex` manually in a project chat. The Mac and Codex need to be
+available for a local run. Change its schedule or pause it in Codex's
+automations UI.
 
-```sh
-gh workflow run personal-upstream.yml --repo balaji-dwa/hex --ref dev
-```
+The skill merges upstream `dev` into a disposable worktree and runs upstream's
+`scripts/check` (formatting, code shape, Nix pins, clippy, and macOS Rust tests),
+app-identity checks, and `git diff --check`. A successful candidate goes
+through a PR in your fork, then advances `dev` to the exact tested candidate
+with an ordinary fast-forward push. A concurrent divergent push is rejected.
+It then installs a
+verified local build using the command below. It leaves user edits intact
+and stops if there is an existing unresolved update PR or update lock.
 
-The workflow merges upstream `dev` into a disposable checkout, then runs
-the fork's Git integration checks, upstream's app-identity checks, and
-`scripts/check` (formatting, code shape, Nix pins, clippy, and macOS Rust tests).
-It uses a standard GitHub macOS runner, without signing or release credentials.
-Only a successful merge and test job can advance `dev`, using a normal Git
-push. A concurrent change to `dev` rejects that push safely.
-
-On conflict, failed checks, or a rejected push, it pushes a unique review
-branch and opens a PR. A conflict branch contains the actual upstream head;
-no unresolved markers are committed. Resolve it locally:
+Conflicts and failed checks get a review PR, leaving `dev` and the installed
+app intact. A conflict branch contains the actual upstream head, without
+committed conflict markers. Resolve it locally:
 
 ```sh
 git fetch origin
 gh pr checkout <number>
 git merge origin/dev
-# Resolve conflicts, keeping the fork's local install/sync safeguards.
+# Resolve conflicts, keeping the fork's local install safeguards.
 git add <resolved-files>
 git commit
-python3 scripts/test-personal-fork.py
 scripts/check
 git push
 ```
 
-Review the PR, then merge it in the fork. An open sync PR pauses further
-sync attempts; closing it without merging permits a fresh attempt. Never
+Review the PR, then merge it in the fork. An open update PR pauses further
+attempts; closing it without merging permits a fresh attempt. Never
 force-push `dev`. Once merged, update your checkout with
 `git switch dev && git pull --ff-only origin dev` and reinstall explicitly.
-The weekly workflow changes source only, never your laptop's installed app.
+The routine reports a source update with a failed installation as partial
+completion, including the blocker and PR or installed commit.
 
-Fork setup disables inherited upstream workflows in GitHub's workflow
-settings (their files stay unchanged to reduce conflicts). Keep release,
-site deployment, SDK publishing, and upstream agent workflows disabled.
-Audit newly introduced workflows after upstream merges. Enable only
-`personal-upstream.yml`; enable GitHub Actions' “Allow GitHub Actions to
-create and approve pull requests.” Scheduled workflows in inactive public
-repositories can be disabled by GitHub after 60 days; re-enable this workflow
-if that happens. No PAT or signing secret belongs in Actions.
+**GitHub Actions is disabled for this fork.** The personal sync workflow was
+removed; inherited workflow files remain unchanged to reduce conflicts.
+The Codex routine uses your existing local GitHub login and keychain signing
+identity, with no CI secrets, update feed, or server.
 
 ## Build and install locally on macOS
 
@@ -156,14 +154,14 @@ Finder. Keep the current `Hex Local-<commit>.app`, the `hex` data folder,
 `~/.config/hex`, and backups. To roll back, quit the local app and open the
 old bundle; if data migration requires restoring a snapshot, preserve the
 current data separately first. Restoring an older snapshot loses changes
-since that snapshot. Neither the installer nor the sync workflow deletes
+since that snapshot. Neither the installer nor the routine deletes
 old apps or data.
 
 ## Propose a feature upstream
 
 The maintainers [accept issues with patches, not outside PRs](../CONTRIBUTING.md).
 Start a small proposal branch directly from current upstream `dev`, apply
-only the feature commits (omit this fork's workflow and installer), then:
+only the feature commits (omit this fork's skill and installer), then:
 
 ```sh
 git fetch upstream dev

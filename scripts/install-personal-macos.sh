@@ -21,7 +21,6 @@ destination="/Applications/Hex Local-$commit.app"
 unset HEX_TEST_BUILD HEX_RELEASE_UNSIGNED HEX_BUILD_CHANNEL HEX_VERSION HEX_BUILD_NUMBER
 unset HEX_APPLICATION_SUPPORT_DIR CARGO_TARGET_DIR
 export HEX_LOCAL_BUILD=1 HEX_COMMIT="$commit"
-python3 scripts/test-personal-fork.py
 scripts/test-app-identity.sh
 scripts/check labs:: dev_build:: updater:: app_paths::
 bundle=$(scripts/build-app.sh)
