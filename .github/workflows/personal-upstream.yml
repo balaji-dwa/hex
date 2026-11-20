@@ -1,0 +1,146 @@
+name: Personal upstream sync
+
+on:
+  schedule:
+    - cron: '53 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: personal-upstream
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.repository == 'balaji-dwa/hex' && github.ref == 'refs/heads/dev'
+    runs-on: macos-26
+    timeout-minutes: 90
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+      merged: ${{ steps.merge.outputs.merged }}
+      sha: ${{ steps.merge.outputs.sha }}
+      branch: ${{ steps.merge.outputs.branch }}
+    env:
+      HEX_LOCAL_BUILD: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge upstream dev in a disposable checkout
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pending=$(gh pr list --repo "$GITHUB_REPOSITORY" --base dev --state open --json headRefName --jq 'any(.[]; .headRefName | startswith("codex/upstream-sync-"))')
+          if [[ "$pending" == true ]]; then
+            echo 'Resolve the existing upstream sync PR first.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git fetch --no-tags https://github.com/anomalyco/hex.git dev
+          upstream=$(git rev-parse FETCH_HEAD)
+          if git merge-base --is-ancestor "$upstream" HEAD; then
+            echo 'Already contains upstream dev.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          branch="codex/upstream-sync-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          git switch -c "$branch"
+          merged=true
+          if ! git -c core.hooksPath=/dev/null merge --no-edit "$upstream"; then
+            git diff --name-only --diff-filter=U >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            # Keep the real upstream head: unresolved markers never become a commit.
+            git switch --detach "$upstream"
+            git branch -f "$branch" "$upstream"
+            merged=false
+          fi
+          git bundle create "$RUNNER_TEMP/candidate.bundle" "origin/dev..$branch"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "merged=$merged" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse "$branch")" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: steps.merge.outputs.merged == 'true'
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: steps.merge.outputs.merged == 'true'
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        if: steps.merge.outputs.merged == 'true'
+        with:
+          tool: cargo-nextest
+      - name: Check the merged local build
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          xcrun --sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+          python3 scripts/test-personal-fork.py
+          scripts/test-app-identity.sh
+          scripts/check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always() && steps.merge.outputs.changed == 'true'
+        with:
+          name: upstream-candidate
+          path: ${{ runner.temp }}/candidate.bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: check
+    if: always() && needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # This job runs only inline Git/GitHub operations; no candidate code or secrets.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: upstream-candidate
+          path: ${{ runner.temp }}/upstream-candidate
+      - name: Fast-forward only after checks, otherwise open a PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ needs.check.outputs.sha }}
+          BRANCH: ${{ needs.check.outputs.branch }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          MERGED: ${{ needs.check.outputs.merged }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git bundle verify "$RUNNER_TEMP/upstream-candidate/candidate.bundle"
+          git fetch "$RUNNER_TEMP/upstream-candidate/candidate.bundle" "$BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
+          gh auth setup-git
+          if [[ "$MERGED" == true && "$CHECK_RESULT" == success ]] &&
+             git -c core.hooksPath=/dev/null push origin "$CANDIDATE:refs/heads/dev"; then
+            echo "Merged verified upstream into dev: $CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c core.hooksPath=/dev/null push origin "$CANDIDATE:refs/heads/$BRANCH"
+          cat > "$RUNNER_TEMP/pr-body.md" <<EOF
+          Upstream dev needs manual resolution. Merge succeeded: $MERGED. Check job: $CHECK_RESULT.
+
+          Logs: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          For conflicts this branch is the upstream head, with no conflict markers committed. Merge origin/dev into this branch, resolve conflicts while retaining the personal fork files, and run the checks in docs/personal-fork.md before merging. Never force-push dev. Closing this PR without merging lets the next sync retry.
+          EOF
+          gh pr create --repo "$GITHUB_REPOSITORY" --base dev --head "$BRANCH" \
+            --title 'Resolve upstream dev sync' --body-file "$RUNNER_TEMP/pr-body.md"

@@ -1,0 +1,65 @@
+#!/bin/bash
+# Build a committed local app; never replace another installed bundle.
+set -euo pipefail
+umask 077
+cd "$(dirname "$0")/.."
+[[ $(uname -s) == Darwin && $(uname -m) == arm64 ]] || {
+  echo 'Requires an Apple silicon Mac.' >&2; exit 1;
+}
+[[ -z $(git status --porcelain) ]] || {
+  echo 'Commit your changes before building a reproducible local app.' >&2; exit 1;
+}
+: "${HEX_TEAM_ID:?Set HEX_TEAM_ID to your Developer ID signing team}"
+. scripts/macos-signing.sh
+hex_codesign_identity "$HEX_TEAM_ID" >/dev/null
+commit=$(git rev-parse --short=12 HEAD)
+destination="/Applications/Hex Local-$commit.app"
+[[ ! -e "$destination" && ! -L "$destination" ]] || {
+  echo "Already exists; refusing to overwrite: $destination" >&2; exit 1;
+}
+# These select distribution or isolated test builds instead of our local app.
+unset HEX_TEST_BUILD HEX_RELEASE_UNSIGNED HEX_BUILD_CHANNEL HEX_VERSION HEX_BUILD_NUMBER
+unset HEX_APPLICATION_SUPPORT_DIR CARGO_TARGET_DIR
+export HEX_LOCAL_BUILD=1 HEX_COMMIT="$commit"
+python3 scripts/test-personal-fork.py
+scripts/test-app-identity.sh
+scripts/check labs:: dev_build:: updater:: app_paths::
+bundle=$(scripts/build-app.sh)
+version=$(hex_version "$PWD")
+scripts/validate-app.sh "$bundle" Hex.app "$version" "$(hex_build_number "$version")"
+temporary=$(mktemp -d)
+trap 'rm -rf "$temporary"' EXIT
+binary="$bundle/Contents/MacOS/hex"
+HEX_APPLICATION_SUPPORT_DIR="$temporary/data" "$binary" app -- \
+  --snap "$temporary/settings.png" --scene mac-settings
+test -s "$temporary/settings.png"
+# A refused quit (for example, an active recording) aborts installation.
+if "$binary" status --json > "$temporary/status.json" 2>/dev/null; then
+  pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$temporary/status.json")
+  "$binary" quit
+  for ((attempt=0; attempt<30; attempt++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo 'Hex has not stopped; leaving all installed apps intact.' >&2; exit 1
+  fi
+fi
+# Snapshot data while Hex is stopped, before a newer build can migrate it.
+backup="$HOME/Library/Application Support/Hex Local Backups/$(date +%Y%m%d-%H%M%S)-$commit"
+mkdir -p "$backup"
+if [[ -d "$HOME/Library/Application Support/hex" ]]; then
+  ditto "$HOME/Library/Application Support/hex" "$backup/data"
+fi
+if [[ -d "$HOME/.config/hex" ]]; then
+  ditto "$HOME/.config/hex" "$backup/config"
+fi
+staging=$(mktemp -d /Applications/.Hex-Local-install.XXXXXX)
+trap 'rm -rf "$temporary" "$staging"' EXIT
+ditto "$bundle" "$staging/Hex.app"
+codesign --verify --deep --strict "$staging/Hex.app"
+mv "$staging/Hex.app" "$destination"
+'/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister' -f "$destination"
+open "$destination"
+printf 'Installed: %s\nData backup: %s\n' "$destination" "$backup"
+echo 'Older Hex bundles can be moved to Trash after verifying this copy in Settings.'
