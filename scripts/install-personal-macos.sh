@@ -29,9 +29,9 @@ scripts/validate-app.sh "$bundle" Hex.app "$version" "$(hex_build_number "$versi
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
 binary="$bundle/Contents/MacOS/hex"
-HEX_APPLICATION_SUPPORT_DIR="$temporary/data" "$binary" app -- \
-  --snap "$temporary/settings.png" --scene mac-settings
-test -s "$temporary/settings.png"
+[[ $("$binary" --version) == "hex $version" ]]
+HEX_APPLICATION_SUPPORT_DIR="$temporary/data" "$binary" history --json > "$temporary/history.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["entries"] == []' "$temporary/history.json"
 # A refused quit (for example, an active recording) aborts installation.
 if "$binary" status --json > "$temporary/status.json" 2>/dev/null; then
   pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$temporary/status.json")
