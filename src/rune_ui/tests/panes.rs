@@ -2615,6 +2615,31 @@ fn browser_access_keeps_its_typing_through_its_own_save() {
 }
 
 #[test]
+fn planner_is_searchable_and_its_toggle_reveals_its_pane_only_on_macos() {
+    for scene in ["mac-labs", "portal", "windows-settings"] {
+        let mut rt = runtime(scene, true, PANE_SIZE);
+        open_labs(&mut rt);
+        rt.update(|ui, _| ui.lab_store.search = rune::TextEdit::new("planner"));
+        settle(&mut rt);
+        assert!(rt.find("nav-planner").is_none());
+        if scene == "mac-labs" {
+            assert!(
+                rt.find("lab-planner").is_some(),
+                "Planner must appear in Labs search"
+            );
+            assert!(!rt.state.settings.labs.planner);
+            tap(&mut rt, "lab-planner");
+            assert!(rt.state.settings.labs.planner);
+            assert!(rt.find("nav-planner").is_some());
+            tap(&mut rt, "lab-planner");
+            assert!(rt.find("nav-planner").is_none());
+        } else {
+            assert!(rt.find("lab-planner").is_none());
+        }
+    }
+}
+
+#[test]
 fn a_labs_card_shows_its_description_and_its_switch_turns_it_on() {
     use crate::labs::Feature;
     let mut rt = runtime("mac-labs", true, (980.0, 2000.0));

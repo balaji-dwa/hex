@@ -704,6 +704,9 @@ fn rows(ui: &Ui) -> Vec<Row> {
     rows.push(row(Feature::HistoryStats, None));
     rows.push(row(Feature::KeepRecordings, None));
     rows.push(row(Feature::CopyDictationAudio, None));
+    if caps.os == super::platform::Os::Macos {
+        rows.push(row(Feature::Planner, Some(Pane::Planner.icon())));
+    }
     // The picker is a Mac gesture and History; elsewhere neither exists.
     if caps.os == super::platform::Os::Macos {
         rows.push(row(Feature::PasteLastPicker, None));

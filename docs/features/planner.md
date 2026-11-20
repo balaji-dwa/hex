@@ -95,7 +95,11 @@ restart/bypass, and damaged files.
 editing arrows, pasted input, Enter, failed saves, manual reopen, Escape,
 the footer position, native Eastern date calculation, and offscreen renders
 of all thirteen slides in both appearances. The ordinary Rune suite also covers
-the Planner sidebar fixture, Lab card and translations, and registry.
+the Planner sidebar fixture, translations, and registry.
+`planner_is_searchable_and_its_toggle_reveals_its_pane_only_on_macos` in
+[pane tests](../../src/rune_ui/tests/panes.rs) exercises the actual Labs card
+list: search for Planner, toggle it on/off, and check the sidebar entry;
+Linux and Windows do not offer the card.
 
 These checks do not establish real microphone transcription/paste, login
 after a real reboot, VoiceOver behavior, multiple physical monitors, or the
@@ -110,3 +114,9 @@ checks (three skipped), the final Planner suite passed 19, and all nine
 existing golden-test groups passed against their files. The 28 new Planner
 renders and two updated Labs renders were inspected in both appearances.
 These are offscreen/test results, subject to the native proof limits above.
+
+The follow-up Labs discovery fix reproduced a missing native card even though
+the CLI knew the setting: the UI's separate card list omitted Planner.
+Its regression test failed before the fix and passed afterward; Linux's Rune
+suite then passed 798 checks (three skipped), macOS's 20 Planner tests passed,
+and strict all-target Clippy passed. The three changed Labs renders were inspected.

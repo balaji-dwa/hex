@@ -55,11 +55,9 @@ quit; report that and leave it running. Keep signing credentials in the
 keychain. If signing, permission, build, or launch fails, retain the old app
 and report the concrete blocker; preserve platform security checks.
 
-Verify the process executable is `/Applications/Hex Local.app/Contents/MacOS/hex`,
-the app reports local-build mode with updates off, and settings/history are
-still available. Record the installed commit, backup path, test results,
-and retired app bundles.
-After updates, installs, or development runs, keep only `/Applications/Hex Local.app` and move other Hex app bundles to Trash; preserve user data and data backups. A source-only update with a failed install is
+Apply [hex-post-update](/Users/aakashdwa/.codex/skills/hex-post-update/SKILL.md)
+after every install. Record the installed commit, backup path, test results,
+and retired app bundles. A source-only update with a failed install is
 partial completion, and must be reported that way.
 
 Remove only the disposable worktree and your lock, keeping any failure PR

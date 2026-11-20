@@ -70,6 +70,6 @@ if ! mv "$staging/Hex.app" "$destination"; then
   exit 1
 fi
 '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister' -f "$destination"
-open "$destination"
+open -na "$destination"
 printf 'Installed: %s\nData backup: %s\n' "$destination" "$backup"
 echo 'Older Hex bundles can be moved to Trash after verifying this copy in Settings.'
