@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update Hex"
+  short_description: "Test upstream updates and install your local Hex"
+  default_prompt: "Use $update-hex to update this fork and install a verified local build."
