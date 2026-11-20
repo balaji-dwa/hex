@@ -8,6 +8,9 @@ impl Feature {
     /// its translated row.
     pub const fn description(self) -> &'static str {
         match self {
+            Self::Planner => {
+                "A persistent daily plan and seven-day review, saved locally. Open-ended answers need five words; checklist items need three characters. Escape or the subtle bottom-right bypass hides the planner for five minutes."
+            }
             Self::Meetings => "Record calls and keep a written copy (its own pane)",
             Self::VoiceFilter => {
                 "A Hex Microphone other apps can pick, with live voice filters (its own pane)"

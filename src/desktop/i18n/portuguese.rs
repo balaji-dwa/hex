@@ -15,6 +15,8 @@ pub(super) fn table() -> &'static HashMap<&'static str, &'static str> {
 
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("Planner", "Planejador"),
+    ("Plan each morning at 6 AM Eastern and review your goals weekly. Enables Launch at login; emergency bypass lasts five minutes.", "Planeje todas as manhãs às 6h do horário do Leste e revise suas metas semanalmente. Ativa a abertura ao iniciar sessão; a pausa de emergência dura cinco minutos."),
     ("Sent to", "Enviado para"),
     ("Nothing here yet", "Ainda não há nada aqui"),
     ("Dictations, annotations, and captures show here.", "Os ditados, as anotações e as capturas aparecem aqui."),

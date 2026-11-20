@@ -60,6 +60,8 @@ impl AppearanceTheme {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct LabsSettings {
+    /// Daily and weekly planning, macOS only.
+    pub planner: bool,
     /// Live text beside the HUD while dictating.
     pub live_text: bool,
     /// A failed dictation's explanation beside the HUD for a few seconds.
@@ -365,6 +367,7 @@ where
 impl Default for LabsSettings {
     fn default() -> Self {
         Self {
+            planner: false,
             live_text: false,
             failure_notices: false,
             live_typing: false,

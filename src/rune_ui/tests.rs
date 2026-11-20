@@ -3518,7 +3518,7 @@ fn annotate_pane_snapshots() {
 
 /// One device for every golden, used one render at a time: creating Vulkan
 /// devices from parallel test threads crashed Mesa's RADV on Linux.
-fn gpu() -> Option<std::sync::MutexGuard<'static, Gpu>> {
+pub(super) fn gpu() -> Option<std::sync::MutexGuard<'static, Gpu>> {
     static GPU: std::sync::OnceLock<Option<std::sync::Mutex<Gpu>>> = std::sync::OnceLock::new();
     GPU.get_or_init(|| {
         Gpu::try_new(Gpu::instance(), None)
@@ -3594,7 +3594,7 @@ fn check_golden(scene: &str, dark: bool, size: (f32, f32)) {
     check_render(scene, dark, render(scene, dark, size));
 }
 
-fn check_render(scene: &str, dark: bool, pixels: Option<(u32, u32, Vec<u8>)>) {
+pub(super) fn check_render(scene: &str, dark: bool, pixels: Option<(u32, u32, Vec<u8>)>) {
     let name = format!("{scene}-{}", if dark { "dark" } else { "light" });
     let Some((width, height, pixels)) = pixels else {
         assert!(
@@ -3702,10 +3702,10 @@ fn whats_new_opens_controls_without_changing_them() {
 
 /// Collects every golden mismatch in a test and fails once at the end, so
 /// one CI run uploads every render that moved rather than only the first.
-struct Goldens;
+pub(super) struct Goldens;
 
 impl Goldens {
-    fn collect() -> Self {
+    pub(super) fn collect() -> Self {
         GOLDEN_MISSES.with(|misses| *misses.borrow_mut() = Some(Vec::new()));
         Self
     }
@@ -3729,6 +3729,7 @@ fn goldens() {
     for dark in [true, false] {
         check_golden("portal", dark, GOLDEN_SIZE);
         for scene in [
+            "mac-planner",
             "history",
             "captures",
             "mac-labs",

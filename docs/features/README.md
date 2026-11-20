@@ -33,6 +33,8 @@ Agents can [read retained transcripts](transcript-cli.md) and
 [Labs](labs.md) gives every unfinished feature its own switch, off by
 default, listed under collapsible groups (Dictation, Output, History,
 Meetings, Annotate, Shortcuts, Models) with only this OS's labs.
+[Planner](planner.md) is an opt-in macOS morning plan and seven-day review,
+with a 6 AM Eastern day boundary and a five-minute emergency bypass.
 Its Sort and filter models toggle (off by default) adds a sort and a saved-language filter to the
 Local transcription picker (#645); its Model test details toggle (off by
 default) shows each model's raw WER or CER with its language, dataset, source,

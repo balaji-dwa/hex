@@ -56,6 +56,7 @@ mod paste_access;
 #[cfg(all(hex_capture, target_os = "macos"))]
 pub(crate) mod paste_picker;
 mod picker;
+pub(crate) mod planner;
 mod platform;
 mod platform_settings;
 pub(crate) mod playground;
@@ -1529,6 +1530,7 @@ fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         Pane::Output => (Vec::new(), output::pane(ui, p, cx.is_reduced_motion())),
         Pane::Modes => modes::pane(ui, p, &mut layer),
         Pane::History => history::pane(ui, p, cx, &mut layer),
+        Pane::Planner => (Vec::new(), planner::pane(ui, p)),
         #[cfg(hex_capture)]
         Pane::Captures => (Vec::new(), captures::pane(ui, p)),
         Pane::Meetings => meetings::pane(ui, p, &mut layer),

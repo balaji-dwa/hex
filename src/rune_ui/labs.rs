@@ -45,6 +45,9 @@ pub(super) fn main_panes(ui: &Ui) -> Vec<Pane> {
         panes.push(Pane::Modes);
     }
     panes.push(Pane::History);
+    if Pane::Planner.shown(ui) {
+        panes.push(Pane::Planner);
+    }
     #[cfg(hex_capture)]
     let optional = [
         Pane::Captures,
@@ -948,6 +951,7 @@ fn row_key(lab: Lab) -> &'static str {
         Feature::StopPhrase => "lab-stop-phrase",
         Feature::HoldThroughKeys => "lab-hold-through-keys",
         Feature::ModesEditor => "lab-modes-editor",
+        Feature::Planner => "lab-planner",
         Feature::DropTranscribe => "lab-drop-transcribe",
     }
 }
