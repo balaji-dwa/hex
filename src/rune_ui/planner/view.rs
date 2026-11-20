@@ -69,27 +69,19 @@ fn field(planner: &Planner, index: usize, label: &str, p: Paint) -> El {
     )
 }
 
-fn task_entry(planner: &Planner, previous: bool, p: Paint) -> El {
-    let index = if previous { 10 } else { 9 };
+fn task_entry(planner: &Planner, p: Paint) -> El {
     row()
         .key("task-entry")
         .gap(8.)
         .center_y()
-        .children(previous.then(|| el().w(24.)))
         .child(
-            TextInput::new(&planner.fields[index])
+            TextInput::new(&planner.fields[9])
                 .width(None)
-                .label(if previous {
-                    "Add another accomplishment"
-                } else {
-                    "Add a step"
-                })
+                .label("Add a step")
                 .placeholder("Add an item…")
-                .on_edit(rune::edit_access(move |state: &mut Planner| {
-                    &mut state.fields[index]
-                }))
+                .on_edit(|state: &mut Planner| &mut state.fields[9])
                 .on_change(|state: &mut Planner, tx| state.edited(tx))
-                .on_submit(move |state: &mut Planner, tx| state.add_step(previous, tx))
+                .on_submit(|state: &mut Planner, tx| state.add_step(tx))
                 .build(p.k)
                 .key("new-step")
                 .grow(1.)
@@ -100,7 +92,7 @@ fn task_entry(planner: &Planner, previous: bool, p: Paint) -> El {
             "Add item · at least three characters",
             &icons::PLUS,
             p,
-            move |state, tx| state.add_step(previous, tx),
+            |state, tx| state.add_step(tx),
         ))
 }
 
@@ -189,7 +181,6 @@ fn yesterday(planner: &Planner, p: Paint) -> El {
             )
             .child(copy("previous-deliverable", &previous.deliverable, p))
             .child(copy("previous-criteria", &previous.criteria, p))
-            .child(copy("completion-question", "Did it meet your criteria?", p))
             .child(
                 row()
                     .gap(8.)
@@ -205,11 +196,21 @@ fn yesterday(planner: &Planner, p: Paint) -> El {
                             previous.delivered == Some(answer),
                             move |state, tx| {
                                 state.ledger.today(date).delivered = Some(answer);
-                                state.edited(tx);
+                                state.advance(tx);
                             },
                         )
                     })),
             );
+    } else {
+        content = content.child(copy("first-day", "No saved plan yet.", p));
+    }
+    content
+}
+
+fn yesterday_tasks(planner: &Planner, p: Paint) -> El {
+    let mut content = col().key("yesterday-tasks").gap(16.);
+    if let Some(previous) = planner.ledger.previous(planner.date) {
+        let date = previous.date;
         for (index, step) in previous.steps.iter().enumerate() {
             content = content.child(check(
                 format!("previous-step-{index}"),
@@ -223,11 +224,11 @@ fn yesterday(planner: &Planner, p: Paint) -> El {
                 },
             ));
         }
-        content = content.child(task_entry(planner, true, p));
-    } else {
-        content = content.child(copy("first-day", "No saved plan yet.", p));
+        if previous.steps.is_empty() {
+            content = content.child(copy("no-steps", "No steps saved.", p));
+        }
     }
-    content.child(field(planner, 0, "What got done?", p))
+    content
 }
 
 fn breakdown(planner: &Planner, p: Paint) -> El {
@@ -265,7 +266,7 @@ fn breakdown(planner: &Planner, p: Paint) -> El {
                 )),
         );
     }
-    list.child(task_entry(planner, false, p))
+    list.child(task_entry(planner, p))
 }
 
 pub(super) fn view(planner: &Planner, cx: &mut Cx<Planner>) -> El {
@@ -354,6 +355,7 @@ pub(super) fn view(planner: &Planner, cx: &mut Cx<Planner>) -> El {
         Slide::Success => field(planner, 8, "What would make this a good week?", p),
         Slide::Picture => summary(planner, p, false),
         Slide::Yesterday => yesterday(planner, p),
+        Slide::YesterdayTasks => yesterday_tasks(planner, p),
         Slide::Today => field(planner, 1, "What are you tackling?", p),
         Slide::Breakdown => breakdown(planner, p),
         Slide::Commit => field(planner, 2, "What will you deliver?", p),

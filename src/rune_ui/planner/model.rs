@@ -67,10 +67,8 @@ pub(super) struct Day {
 
 impl Day {
     pub fn valid(&self) -> bool {
-        answer(&self.yesterday)
-            && answer(&self.problem)
+        answer(&self.problem)
             && self.pending_step.trim().is_empty()
-            && self.pending_accomplishment.trim().is_empty()
             && !self.steps.is_empty()
             && self.steps.len() <= MAX_STEPS
             && self.steps.iter().all(|step| task(&step.text))
@@ -179,9 +177,15 @@ impl Ledger {
     }
 
     pub fn previous(&self, date: i64) -> Option<&Day> {
+        // Opening and bypassing an empty day must not hide the last real plan.
         self.days
             .iter()
-            .filter(|day| day.date < date)
+            .filter(|day| {
+                day.date < date
+                    && (day.committed
+                        || !day.steps.is_empty()
+                        || !day.deliverable.trim().is_empty())
+            })
             .max_by_key(|day| day.date)
     }
 

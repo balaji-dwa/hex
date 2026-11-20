@@ -56,9 +56,7 @@ fn planner_first_week_setup_then_daily_commit_enforces_both_minimums() {
     enter(&mut rt);
     assert_eq!(rt.state.slide, Slide::Picture);
     enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Yesterday);
-    fill(&mut rt, 0, "I finished the planning data model");
-    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Today);
     fill(&mut rt, 1, "Make the daily planning overlay usable");
     enter(&mut rt);
     assert_eq!(rt.state.slide, Slide::Breakdown);
@@ -245,7 +243,7 @@ fn planner_breakdown_has_no_checkboxes_and_uses_yesterdays_unfinished_steps() {
         .unwrap();
     assert_eq!(saved.rect[0], add.rect[0]);
     assert_eq!(saved.rect[2], add.rect[2]);
-    rt.state.slide = Slide::Yesterday;
+    rt.state.slide = Slide::YesterdayTasks;
     rt.invalidate();
     rt.settle_all();
     rt.frame(0.01);
@@ -254,6 +252,49 @@ fn planner_breakdown_has_no_checkboxes_and_uses_yesterdays_unfinished_steps() {
         rt.accessibility_json()
             .to_string()
             .contains("\"check-box\"")
+    );
+}
+
+#[test]
+fn planner_yesterdays_deliverable_and_tasks_are_separate_choice_only_pages() {
+    let mut rt = runtime();
+    rt.state = fixture(Slide::Picture);
+    rt.state.ledger.today(20_776).delivered = None;
+    rt.state.ledger.today(rt.state.date).steps.clear();
+    rt.state.steps.clear();
+    rt.invalidate();
+    rt.settle_all();
+    rt.frame(0.01);
+    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Yesterday);
+    assert!(rt.find("delivered-yes").is_some());
+    assert!(rt.find("previous-step-0").is_none());
+    assert!(rt.find("new-step").is_none());
+    assert!(
+        !rt.elements()
+            .iter()
+            .any(|element| element.path.contains("/question-"))
+    );
+    tap(&mut rt, "delivered-no");
+    assert_eq!(rt.state.slide, Slide::YesterdayTasks);
+    assert_eq!(
+        rt.state.ledger.previous(rt.state.date).unwrap().delivered,
+        Some(false)
+    );
+    assert!(rt.find("new-step").is_none());
+    assert!(
+        !rt.elements()
+            .iter()
+            .any(|element| element.path.contains("/question-"))
+    );
+    tap(&mut rt, "previous-step-1");
+    tap(&mut rt, "planner-next");
+    assert_eq!(rt.state.slide, Slide::Today);
+    tap(&mut rt, "planner-next");
+    assert_eq!(rt.state.slide, Slide::Breakdown);
+    assert!(
+        rt.state.steps.is_empty(),
+        "both of yesterday's tasks are now checked"
     );
 }
 
@@ -426,6 +467,7 @@ fn planner_renders() {
             ("success", Slide::Success),
             ("picture", Slide::Picture),
             ("yesterday", Slide::Yesterday),
+            ("yesterday-tasks", Slide::YesterdayTasks),
             ("today", Slide::Today),
             ("breakdown", Slide::Breakdown),
             ("commit", Slide::Commit),

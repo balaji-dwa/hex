@@ -129,6 +129,19 @@ fn breakdown_carries_only_tasks_still_unfinished_after_yesterdays_review_once() 
 }
 
 #[test]
+fn bypassed_empty_days_do_not_lose_unfinished_tasks() {
+    let mut ledger = Ledger::default();
+    ledger.today(100).steps.push(Step {
+        text: "Still to do".into(),
+        done: false,
+    });
+    ledger.today(101);
+    assert_eq!(ledger.previous(102).unwrap().date, 100);
+    ledger.carry_forward(102);
+    assert_eq!(ledger.today(102).steps[0].text, "Still to do");
+}
+
+#[test]
 fn commit_requires_all_answers_steps_and_previous_deliverable_status() {
     let mut ledger = Ledger::default();
     ledger.weeks.push(week(100));

@@ -31,8 +31,8 @@ when Planner is turned off.
 Daily planning                                         // planner.daily
 ├── Big picture -> goal, weekly focus, success criteria, remaining work,
 │                 completed deliverables and checked steps
-├── Yesterday -> mark the last plan's checklist, say whether its deliverable
-│               met its criteria, add accomplishments, reflect in an answer
+├── Yesterday -> show the deliverable and criteria -> Yes / Not yet
+├── Yesterday’s steps -> check off the list; no add row or text answer
 │   └── Missed days -> label the last plan with its actual date
 ├── Today -> choose one problem or piece
 ├── Breakdown -> today's problem above editable steps (add/remove only)
@@ -59,7 +59,7 @@ entry waiting for Add must be added or cleared before leaving that slide.
 
 Each open-ended question has its own slide with a large text area. Word-count
 labels and slide numbers are hidden; the minimum is explained only on an
-invalid submission. The header has icon-only previous/next arrows.
+invalid submission. The header has icon-only previous/next arrows before Daily / Weekly; each question is its own title.
 
 The keyboard works without global interception: Left/Right navigate outside
 an editor; inside an editor they move the caret. Enter advances/submits (Shift+Enter adds a line);
@@ -67,7 +67,8 @@ Enter in Add an item adds that item. Tab moves through named controls. Hex
 dictation can paste into the normal Rune editors. The small, subdued bypass
 stays in the footer's bottom-right, outside the scrolling content. Reopening
 a completed plan starts at its breakdown; closing it does not schedule another
-reminder that day.
+reminder that day. Escape is the same five-minute bypass while planning is due.
+On the first day, with no previous plan, the two yesterday pages are skipped.
 
 Checkboxes appear only while reviewing the previous plan. The first visit to
 today’s breakdown copies the steps still unchecked after that review. Later
@@ -93,7 +94,7 @@ restart/bypass, and damaged files.
 [Planner UI tests](../../src/rune_ui/planner/tests.rs) drive both flows,
 editing arrows, pasted input, Enter, failed saves, manual reopen, Escape,
 the footer position, native Eastern date calculation, and offscreen renders
-of all twelve slides in both appearances. The ordinary Rune suite also covers
+of all thirteen slides in both appearances. The ordinary Rune suite also covers
 the Planner sidebar fixture, Lab card and translations, and registry.
 
 These checks do not establish real microphone transcription/paste, login

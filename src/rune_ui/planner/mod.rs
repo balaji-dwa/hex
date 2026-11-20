@@ -27,6 +27,7 @@ enum Slide {
     Success,
     Picture,
     Yesterday,
+    YesterdayTasks,
     Today,
     Breakdown,
     Commit,
@@ -43,7 +44,8 @@ impl Slide {
             Self::Focus => "What will you focus on this week?",
             Self::Success => "What would make this a good week?",
             Self::Picture => "Big picture",
-            Self::Yesterday => "What got done yesterday?",
+            Self::Yesterday => "Did it meet your criteria?",
+            Self::YesterdayTasks => "Which steps did you finish?",
             Self::Today => "What are you tackling?",
             Self::Breakdown => "Break it down",
             Self::Commit => "What will you deliver?",
@@ -56,7 +58,7 @@ pub(crate) struct Planner {
     ledger: Ledger,
     date: i64,
     slide: Slide,
-    fields: [TextEdit; 11],
+    fields: [TextEdit; 10],
     steps: Vec<TextEdit>,
     visible: bool,
     path: Option<PathBuf>,
@@ -105,14 +107,17 @@ impl Planner {
                 ]
             }
         } else {
-            vec![
-                Slide::Picture,
-                Slide::Yesterday,
+            let mut slides = vec![Slide::Picture];
+            if self.ledger.previous(self.date).is_some() {
+                slides.extend([Slide::Yesterday, Slide::YesterdayTasks]);
+            }
+            slides.extend([
                 Slide::Today,
                 Slide::Breakdown,
                 Slide::Commit,
                 Slide::Criteria,
-            ]
+            ]);
+            slides
         }
     }
 
@@ -126,7 +131,6 @@ impl Planner {
         self.fields[2] = TextEdit::new(day.deliverable.clone());
         self.fields[3] = TextEdit::new(day.criteria.clone());
         self.fields[9] = TextEdit::new(day.pending_step.clone());
-        self.fields[10] = TextEdit::new(day.pending_accomplishment.clone());
         self.steps = day
             .steps
             .iter()
@@ -162,7 +166,6 @@ impl Planner {
         day.deliverable = self.fields[2].text.clone();
         day.criteria = self.fields[3].text.clone();
         day.pending_step = self.fields[9].text.clone();
-        day.pending_accomplishment = self.fields[10].text.clone();
         for (step, edit) in day.steps.iter_mut().zip(&self.steps) {
             step.text = edit.text.clone();
         }
@@ -238,14 +241,10 @@ impl Planner {
             Slide::Remaining => valid(6),
             Slide::Focus => valid(7),
             Slide::Success => valid(8),
-            Slide::Yesterday => {
-                valid(0)
-                    && self.fields[10].text.trim().is_empty()
-                    && self
-                        .ledger
-                        .previous(self.date)
-                        .is_none_or(|day| day.delivered.is_some())
-            }
+            Slide::Yesterday => self
+                .ledger
+                .previous(self.date)
+                .is_none_or(|day| day.delivered.is_some()),
             Slide::Today => valid(1),
             Slide::Breakdown => {
                 !self.steps.is_empty()
@@ -261,7 +260,18 @@ impl Planner {
     fn advance(&mut self, tx: &mut Tx) {
         self.sync();
         if !self.valid_slide() {
-            self.error = Some("Five words per answer. Three characters per step. Add or clear any unfinished item.".into());
+            self.error = Some(
+                match self.slide {
+                    Slide::Yesterday => "Choose Yes or Not yet.",
+                    Slide::Breakdown if !self.fields[9].text.trim().is_empty() => {
+                        "Add or clear the new item first."
+                    }
+                    Slide::Breakdown if self.steps.is_empty() => "Add at least one step.",
+                    Slide::Breakdown => "Each step needs at least three characters.",
+                    _ => "Use at least five words; shorten very long answers.",
+                }
+                .into(),
+            );
             return;
         }
         let slides = self.slides();
@@ -324,33 +334,23 @@ impl Planner {
         }
     }
 
-    fn add_step(&mut self, previous: bool, tx: &mut Tx) {
-        let field = if previous { 10 } else { 9 };
-        let value = self.fields[field].text.trim().to_owned();
+    fn add_step(&mut self, tx: &mut Tx) {
+        let value = self.fields[9].text.trim().to_owned();
         if !model::task(&value) {
-            self.error = Some("Checklist items need at least three characters".into());
+            self.error = Some("Use at least three characters.".into());
             return;
         }
-        let day = if previous {
-            let Some(date) = self.ledger.previous(self.date).map(|day| day.date) else {
-                return;
-            };
-            self.ledger.today(date)
-        } else {
-            self.ledger.today(self.date)
-        };
+        let day = self.ledger.today(self.date);
         if day.steps.len() >= model::MAX_STEPS {
             self.error = Some("Keep the list to 100 steps".into());
             return;
         }
         day.steps.push(Step {
             text: value.clone(),
-            done: previous,
+            done: false,
         });
-        if !previous {
-            self.steps.push(TextEdit::new(value));
-        }
-        self.fields[field] = TextEdit::default();
+        self.steps.push(TextEdit::new(value));
+        self.fields[9] = TextEdit::default();
         self.edited(tx);
     }
 }
