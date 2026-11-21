@@ -15,7 +15,10 @@ use rune::{
     ScreenEdge,
 };
 
-use super::{Ledger, Planner};
+use super::{
+    Ledger, Planner,
+    peek::{self, Peek},
+};
 use crate::app_settings::AppSettings;
 use crate::desktop::login_item::{LoginItemRequest, LoginItemStatus, LoginItemWorker};
 
@@ -33,6 +36,8 @@ pub(super) fn visible(value: bool) {
 
 pub(crate) struct Driver {
     panel: rune::OverlayHandle<Planner>,
+    peek: rune::OverlayHandle<Peek>,
+    option: bool,
     last: Instant,
     enabled: bool,
     loaded: bool,
@@ -67,8 +72,31 @@ pub(crate) fn install<S: 'static>(app: &mut rune::App<S>) -> Driver {
     );
     let own = panel.clone();
     panel.update(move |state, _| state.panel = Some(own));
+    let peek = app.overlay(
+        OverlaySpec {
+            name: "Hex Planner tasks",
+            size: peek::SIZE,
+            edge: ScreenEdge::Top,
+            margin: 44.,
+            align: rune::Align::End,
+            inset: 20.,
+            interactive: false,
+            view: peek::view,
+        }
+        .options(OverlayOptions {
+            display: DisplayTarget::UnderPointer,
+            keys: KeyPolicy::None,
+            input: OverlayInput::Regions,
+            ..Default::default()
+        })
+        .macos_level(3)
+        .release_gpu_when_hidden(),
+        Peek::default(),
+    );
     Driver {
         panel,
+        peek,
+        option: false,
         last: Instant::now() - Duration::from_secs(1),
         enabled: false,
         loaded: false,
@@ -83,9 +111,13 @@ impl Driver {
         backdrops(VISIBLE.load(Ordering::Acquire));
         let feature = crate::labs::Feature::Planner;
         let enabled = feature.shipped() && feature.on(settings) && feature.managed().is_none();
+        let option = enabled && crate::suppression::option_held_now();
+        let option_changed = option != self.option;
+        self.option = option;
         let manual = OPEN.swap(false, Ordering::AcqRel);
         if !enabled {
             if self.enabled {
+                Peek::present(&self.peek, Peek::default());
                 self.panel.update(|state, _| {
                     state.save();
                     state.visible = false;
@@ -125,7 +157,7 @@ impl Driver {
                 self.panel.update(move |state, _| state.login_note = note);
             }
         }
-        if !manual && self.last.elapsed() < Duration::from_secs(1) {
+        if !manual && !option_changed && self.last.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.last = Instant::now();
@@ -134,6 +166,7 @@ impl Driver {
         let away = crate::audio::system_idle::released();
         let load = !self.loaded;
         self.loaded = true;
+        let peek = self.peek.clone();
         self.panel.update(move |state, tx| {
             if load {
                 let panel = state.panel.take();
@@ -166,6 +199,7 @@ impl Driver {
                 state.reveal(manual);
                 tx.focus("planner-content", false);
             }
+            Peek::present(&peek, Peek::snapshot(state, option, away));
         });
     }
 }

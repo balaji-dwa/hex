@@ -410,6 +410,14 @@ pub(crate) fn alpha_shift_now() -> bool {
         != 0
 }
 
+/// Read-only observation; the Planner peek never consumes Option or its chords.
+pub(crate) fn option_held_now() -> bool {
+    // SAFETY: a read-only CoreGraphics state query.
+    (unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) }
+        & crate::app_settings::OPTION_KEY_MASK)
+        != 0
+}
+
 /// The modifier flags that keep a keyboard from reading neutral. Caps Lock's
 /// alpha shift is a toggle rather than a hold, and arrow-key metadata can
 /// leave SecondaryFn set after release, which `recover_stale_keys_with`
