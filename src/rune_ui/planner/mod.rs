@@ -13,6 +13,7 @@ use model::{Ledger, Step};
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 mod model;
+mod peek;
 #[cfg(test)]
 mod tests;
 mod view;

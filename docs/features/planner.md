@@ -73,6 +73,21 @@ a completed plan starts at its breakdown; closing it does not schedule another
 reminder that day. Escape is the same five-minute bypass while planning is due.
 On the first day, with no previous plan, the two yesterday pages are skipped.
 
+```ts
+Hold either Option key (Planner Lab on)                 // planner.peek
+├── Planner closed and session awake -> today's unfinished steps, upper-right
+│   └── Read-only floating cards; scroll over the stack for longer lists
+└── Release Option / lock / sleep / disable Lab -> hide the cards
+```
+
+The peek uses the display under the pointer when shown and takes no keyboard
+focus. It reads the in-memory plan, including saved draft steps, and never
+marks tasks complete. Empty lists say "No unfinished steps." It observes
+Option without consuming events or changing dictation shortcuts. The existing
+app pump checks modifiers at most 250 ms apart while idle (16 ms during HUD
+animation); hidden cards release their GPU surface. The full planner takes
+priority over the peek, and yesterday's tasks are never presented as today's.
+
 Checkboxes appear only while reviewing the previous plan. The first visit to
 today’s breakdown copies the steps still unchecked after that review. Later
 visits and restarts preserve additions/removals instead of seeding again.
@@ -108,6 +123,12 @@ These checks do not establish real microphone transcription/paste, login
 after a real reboot, VoiceOver behavior, multiple physical monitors, or the
 ordering of real system dialogs. Native panels use floating levels rather
 than kiosk mode or keyboard event taps; OS shortcuts remain usable by design.
+
+[Peek tests](../../src/rune_ui/planner/peek.rs) cover release/away/full-planner
+visibility, date selection, completed-task filtering, read-only behavior,
+long text, scrolling all 100 tasks, and light/dark Rune renders. Physical
+Option holds, native placement/focus, and simultaneous dictation remain
+unverified; the peek adds only a read-only modifier query to the existing pump.
 
 Executed November 20, 2026: the macOS `scripts/check` run passed formatting,
 code shape, Nix pins, strict workspace Clippy, and 3,380 tests (34 opt-in
