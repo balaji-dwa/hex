@@ -87,7 +87,8 @@ Today’s Steps floating overlay                         // planner.peek
 │   ├── TapOnly (dictation == bare Option in Hold mode)
 │   │   ├── Clean Option tap (< 280 ms) -> toggle pinned open/closed
 │   │   │   └── double_tap_lock on -> defer 300 ms; 2nd press cancels (zero flash)
-│   │   ├── Hold Option (>= 300 ms) -> dictation only (never shows hold preview)
+│   │   ├── Hold Option alone (>= 280 ms) -> preview while held, beside the dictation
+│   │   │   ├── Clicking a step or Pin cancels that dictation (nothing pastes)
 │   │   │   └── Start tone waits until hold registers so Option taps stay silent
 │   │   └── Menu bar › Today’s Steps -> toggle pinned open/closed
 │   └── MenuBarOnly (dictation == bare Option in Toggle mode)
@@ -104,7 +105,8 @@ Today’s Steps floating overlay                         // planner.peek
 │   ├── Clicking a step toggles & saves immediately (and cancels any Option capture)
 │   │   └── When pinned -> selects row & requests keys for ↑↓ / Space / Enter / Esc
 │   ├── Losing overlay window focus -> clears selection & keyboard hint
-│   └── Intentional dictation (>= 300 ms or control/API) / lock / sleep / opening Planner / disabling Lab -> hides
+│   └── Intentional dictation (>= 300 ms or control/API) unpins; while Option
+│       is not held it hides, as do lock / sleep / opening Planner / disabling Lab
 ```
 
 In `TapOnly` mode (bare Option in Hold mode with Labs › Planner on), the
@@ -117,7 +119,7 @@ finished so stray background audio is never transcribed, and provisional
 presses never unpin an already-pinned Today's Steps card — so tapping Option
 while pinned closes it cleanly without flickering back open. Once dictation
 passes the 300 ms intentional-hold threshold (or starts via control/API),
-Today's Steps immediately unpins and hides.
+Today's Steps unpins, and stays up only while Option is still held.
 
 Drafts save after edits and immediately on navigation, step toggles, or
 dismissal, using Hex's crash-safe owner-only writer (0600 on macOS). A failed

@@ -412,7 +412,7 @@ pub(super) fn view(planner: &Planner, cx: &mut Cx<Planner>) -> El {
                 "Check off steps here, tap or hold ⌥ Option, or use Today’s Steps in the menu bar."
             }
             super::OptionPeekMode::TapOnly => {
-                "Check off steps here, tap ⌥ Option to toggle Today’s Steps, or use the menu bar."
+                "Check off steps here, tap ⌥ Option to pin Today’s Steps, or hold it to glance."
             }
             super::OptionPeekMode::MenuBarOnly => {
                 "Check off steps here, or open Today’s Steps from Hex’s menu bar anytime."

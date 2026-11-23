@@ -306,6 +306,18 @@ impl Peek {
         }
     }
 
+    /// Unpins and hides the card now. The driver's next snapshot already
+    /// reads hidden, so `present` sees no change and would never hide the
+    /// window itself.
+    pub(super) fn close(&mut self) {
+        self.set_pinned(false);
+        self.shown = false;
+        #[cfg(target_os = "macos")]
+        if let Some(handle) = &self.handle {
+            handle.hide();
+        }
+    }
+
     pub(super) fn open_planner(&self) {
         if let Some(callback) = &self.on_open {
             callback();
@@ -357,8 +369,7 @@ pub(super) fn on_key(state: &mut Peek, event: &KeyEvent, tx: &mut Tx) -> bool {
     let order = state.ordered_indices();
     match event.key {
         Key::Escape => {
-            state.set_pinned(false);
-            state.shown = false;
+            state.close();
             true
         }
         Key::Down if !order.is_empty() => {
@@ -514,10 +525,7 @@ pub(super) fn view(state: &Peek, cx: &mut Cx<Peek>) -> El {
                 .label("Close today’s steps")
                 .variant(IconButtonVariant::Ghost)
                 .control_size(ControlSize::Small)
-                .on_press(|s: &mut Peek| {
-                    s.set_pinned(false);
-                    s.shown = false;
-                })
+                .on_press(Peek::close)
                 .build(p.k)
                 .key("peek-close")
                 .hit(),

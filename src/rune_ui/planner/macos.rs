@@ -227,11 +227,12 @@ impl Driver {
         if dictating {
             PEEK_PINNED.store(false, Ordering::Release);
         }
-        // Only show a temporary hold preview when dictation doesn't use bare Option,
-        // and wait `OPTION_HOLD_DELAY` (== `OPTION_TAP_MAX`, 280 ms) so taps never
-        // cross the preview threshold.
+        // Show Today's Steps while Option is held alone, also when bare Option
+        // dictates in Hold mode (the list stays up beside the recording, and a
+        // click on it cancels that dictation). Wait `OPTION_HOLD_DELAY`
+        // (== `OPTION_TAP_MAX`, 280 ms) so taps never cross the preview threshold.
         let option_raw = enabled
-            && option_mode == OptionPeekMode::TapOrHold
+            && option_mode != OptionPeekMode::MenuBarOnly
             && crate::suppression::option_alone_held_now();
         let now_instant = Instant::now();
         let prev_option = self.option_active;
@@ -345,7 +346,8 @@ impl Driver {
             let pinned_now = PEEK_PINNED.load(Ordering::Acquire);
             Peek::present(
                 &peek,
-                Peek::snapshot(state, option, away, dictating, pinned_now),
+                // Holding Option keeps the list up even while that hold dictates.
+                Peek::snapshot(state, option, away, dictating && !option, pinned_now),
             );
         });
     }
