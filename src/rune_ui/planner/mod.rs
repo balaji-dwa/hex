@@ -76,7 +76,7 @@ pub(super) enum OptionPeekMode {
     /// Dictation doesn't use bare Option: tap Option to toggle pinned, hold Option to peek, or use menu bar.
     #[default]
     TapOrHold,
-    /// Dictation uses bare Option in Hold mode: tap Option to toggle pinned (hold stays for dictation), or use menu bar.
+    /// Dictation uses bare Option in Hold mode: tap Option to toggle pinned, or hold Option to see the list while dictating, or use menu bar.
     TapOnly,
     /// Dictation uses bare Option in Toggle mode: Option tap starts/stops dictation, so Today's Steps opens from the menu bar.
     MenuBarOnly,
@@ -657,7 +657,7 @@ pub(super) fn pane(ui: &super::Ui, p: Paint) -> rune::El {
             "Take a few minutes each morning at 6 AM Eastern to commit to today’s focus. Tap or hold ⌥ Option—or open Today’s Steps from Hex’s menu bar—to view and check off steps anytime. Your plans stay on this Mac."
         }
         OptionPeekMode::TapOnly => {
-            "Take a few minutes each morning at 6 AM Eastern to commit to today’s focus. Tap ⌥ Option to toggle Today’s Steps (hold ⌥ Option stays for dictation), or open Today’s Steps from Hex’s menu bar. Your plans stay on this Mac."
+            "Take a few minutes each morning at 6 AM Eastern to commit to today’s focus. Tap ⌥ Option to pin Today’s Steps and check off steps, or hold it to glance while you dictate. Today’s Steps is also in Hex’s menu bar. Your plans stay on this Mac."
         }
         OptionPeekMode::MenuBarOnly => {
             "Take a few minutes each morning at 6 AM Eastern to commit to today’s focus. Open Today’s Steps from Hex’s menu bar anytime to view and check off steps (⌥ Option stays reserved for Toggle dictation). Your plans stay on this Mac."
