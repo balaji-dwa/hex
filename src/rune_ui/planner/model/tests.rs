@@ -21,16 +21,19 @@ fn day(date: i64) -> Day {
             done: false,
         }],
         deliverable: "A working keyboard driven planning overlay".into(),
-        criteria: "All five daily slides save correctly".into(),
+        criteria: "All daily slides save correctly".into(),
         ..Day::default()
     }
 }
 
 #[test]
-fn minimums_count_words_and_trimmed_unicode_characters() {
-    assert!(!answer("one two three four"));
-    assert!(answer("one  two\nthree\tfour five"));
-    assert!(!answer("one two three four ..."));
+fn validation_accepts_concise_meaningful_answers_and_rejects_empty_or_too_long() {
+    assert!(!answer(""));
+    assert!(!answer("   "));
+    assert!(!answer("..."));
+    assert!(!answer("ab"));
+    assert!(answer("Ship it"));
+    assert!(answer("Fix auth bug"));
     assert!(!answer(&"long ".repeat(MAX_TEXT)));
     assert!(!task("  ab  "));
     assert!(task("  中文字  "));
@@ -38,14 +41,17 @@ fn minimums_count_words_and_trimmed_unicode_characters() {
 }
 
 #[test]
-fn dates_match_the_ledgers_calendar() {
+fn dates_and_plurals_format_cleanly() {
     assert_eq!(date_label(0), "1970-01-01");
     assert_eq!(date_label(-1), "1969-12-31");
     assert_eq!(date_label(11_017), "2000-03-01");
-    assert_eq!(
-        date_label(planning_day(1_795_172_400, -5 * 3_600)),
-        "2026-11-20"
-    );
+    let nov_20 = planning_day(1_795_172_400, -5 * 3_600);
+    assert_eq!(date_label(nov_20), "2026-11-20");
+    assert_eq!(human_date_label(nov_20), "Fri, Nov 20");
+    assert_eq!(short_weekday(nov_20), "F");
+    assert_eq!(plural(0, "day", "days"), "0 days");
+    assert_eq!(plural(1, "day", "days"), "1 day");
+    assert_eq!(plural(3, "step", "steps"), "3 steps");
 }
 
 #[test]
@@ -83,7 +89,7 @@ fn weekly_review_is_due_after_seven_calendar_days_even_without_daily_plans() {
 }
 
 #[test]
-fn breakdown_carries_only_tasks_still_unfinished_after_yesterdays_review_once() {
+fn breakdown_seeds_carry_over_triage_once_instead_of_silently_copying() {
     let mut ledger = Ledger::default();
     ledger.today(100).steps = vec![
         Step {
@@ -98,32 +104,50 @@ fn breakdown_carries_only_tasks_still_unfinished_after_yesterdays_review_once() 
             text: "Carry this forward".into(),
             done: false,
         },
+        Step {
+            text: "Drop this one".into(),
+            done: false,
+        },
     ];
     ledger.today(101);
     ledger.today(100).steps[1].done = true;
-    ledger.carry_forward(101);
+    ledger.seed_carry_over(101);
+    assert!(
+        ledger.today(101).steps.is_empty(),
+        "unfinished items await explicit Keep / Drop triage"
+    );
+    assert_eq!(
+        ledger.today(101).carry_over,
+        vec!["Carry this forward", "Drop this one"]
+    );
+    assert_eq!(
+        ledger.keep_carry_over(101, 0),
+        Some("Carry this forward".into())
+    );
+    assert!(ledger.drop_carry_over(101, 0));
+    assert!(ledger.today(101).carry_over.is_empty());
     assert_eq!(
         ledger.today(101).steps,
         vec![Step {
             text: "Carry this forward".into(),
-            done: false
+            done: false,
         }]
     );
     assert_eq!(
         ledger.today(100).steps.len(),
-        3,
+        4,
         "keep the original history"
     );
     ledger.today(101).steps.clear();
-    ledger.carry_forward(101);
+    ledger.seed_carry_over(101);
     assert!(
-        ledger.today(101).steps.is_empty(),
-        "a removed task stays removed"
+        ledger.today(101).carry_over.is_empty(),
+        "triaged items do not reappear"
     );
     let mut reread: Ledger = serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
-    reread.carry_forward(101);
+    reread.seed_carry_over(101);
     assert!(
-        reread.today(101).steps.is_empty(),
+        reread.today(101).carry_over.is_empty(),
         "restart does not seed again"
     );
 }
@@ -137,8 +161,19 @@ fn bypassed_empty_days_do_not_lose_unfinished_tasks() {
     });
     ledger.today(101);
     assert_eq!(ledger.previous(102).unwrap().date, 100);
-    ledger.carry_forward(102);
-    assert_eq!(ledger.today(102).steps[0].text, "Still to do");
+    ledger.seed_carry_over(102);
+    assert_eq!(ledger.today(102).carry_over, vec!["Still to do"]);
+}
+
+#[test]
+fn toggle_step_flips_done_state_safely() {
+    let mut ledger = Ledger::default();
+    ledger.days.push(day(100));
+    assert!(!ledger.day_ref(100).unwrap().steps[0].done);
+    assert!(ledger.toggle_step(100, 0));
+    assert!(ledger.day_ref(100).unwrap().steps[0].done);
+    assert!(!ledger.toggle_step(100, 99));
+    assert!(!ledger.toggle_step(999, 0));
 }
 
 #[test]

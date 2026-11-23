@@ -849,7 +849,10 @@ CoreAudio formats, AppleScript details, or event serialization.
   is provisional, sounds after a 40 ms chord grace, and a chord or short tap
   retracts it (silently inside the grace, else
   a 20 ms fade). With the microphone released while idle, the tone waits for
-  the open microphone and the hold.
+  the open microphone and the hold. When macOS Labs › Planner is on and the
+  shortcut starting capture is Option alone in Hold mode, that shortcut also
+  waits for the hold threshold so short Option taps that toggle Today's Steps
+  stay silent (other shortcuts and Toggle mode keep their 40 ms tone).
 - When `Release microphone while idle` is
   enabled, pressing the shortcut opens the selected device asynchronously with
   no pre-roll, preserves the physical press for the hold threshold, discards a

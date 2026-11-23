@@ -86,6 +86,10 @@ pub(super) struct Release {
     /// latch clears once the stream is back, but a capture pressed cold keeps
     /// its wall-clock edge and still owes its start tone.
     pub(super) capture: bool,
+    /// Whether the active capture deferred its start tone until it becomes
+    /// intentional (either because the microphone was released or because
+    /// bare-Option Hold mode shares short Option taps with Planner).
+    pub(super) deferred_tone: bool,
 }
 
 impl Release {
@@ -94,13 +98,27 @@ impl Release {
         Self {
             press: released,
             capture: released,
+            deferred_tone: released,
         }
     }
 
     /// Records the capture starting now: it is cold exactly when a press
     /// meets a released microphone.
     pub(super) fn begin(&mut self) {
+        self.begin_with_deferred_tone(false);
+    }
+
+    /// Records a capture whose start tone should wait until the capture
+    /// becomes intentional (past the hold threshold), keeping short Option
+    /// glances silent.
+    pub(super) fn begin_with_deferred_tone(&mut self, defer_tone: bool) {
         self.capture = self.press;
+        self.deferred_tone = self.press || defer_tone;
+    }
+
+    /// Takes the pending start-tone obligation once the capture becomes intentional.
+    pub(super) fn take_deferred_tone(&mut self) -> bool {
+        std::mem::take(&mut self.deferred_tone)
     }
 
     /// This pass's press latch, keeping the recording capture's own record.
@@ -108,6 +126,7 @@ impl Release {
         Self {
             press: release_for_press(released, self.press, input_open),
             capture: self.capture,
+            deferred_tone: self.deferred_tone,
         }
     }
 }

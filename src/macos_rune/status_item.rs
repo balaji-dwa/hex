@@ -120,6 +120,13 @@ objc2::define_class!(
             crate::screenshots::restore_last();
         }
 
+        /// Labs › Planner: toggle the pinned Today's Steps overlay without
+        /// holding Option or triggering dictation.
+        #[unsafe(method(togglePlannerSteps:))]
+        fn toggle_planner_steps(&self, _sender: &AnyObject) {
+            crate::rune_ui::planner::macos::toggle_peek();
+        }
+
         /// The status menu's delegate: it is about to open.
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, _menu: &NSMenu) {
@@ -127,6 +134,7 @@ objc2::define_class!(
             refresh_recent_dictations();
             refresh_copy_dictation_audio();
             refresh_restore_capture();
+            refresh_planner_steps();
             refresh_upcoming();
             update_pause();
         }
@@ -280,6 +288,8 @@ enum Row {
     CopyLastMeetingTranscript,
     /// Labs › Screenshots: hidden until the menu opens with it on.
     RestoreCapture,
+    /// Labs › Planner: toggle the pinned Today's Steps overlay.
+    PlannerSteps,
     SpeechModel,
     Separator,
     Settings,
@@ -290,7 +300,7 @@ enum Row {
 /// How many upcoming meetings the menu lists at most.
 const UPCOMING_ROWS: usize = crate::calendar_menu::MAX_ROWS;
 
-const ROWS: [Row; 24] = [
+const ROWS: [Row; 25] = [
     Row::UpcomingHeader,
     Row::UpcomingSlot,
     Row::UpcomingSlot,
@@ -310,6 +320,7 @@ const ROWS: [Row; 24] = [
     Row::CopyRecentDictation,
     Row::CopyLastMeetingTranscript,
     Row::RestoreCapture,
+    Row::PlannerSteps,
     Row::SpeechModel,
     Row::Separator,
     Row::Settings,
@@ -348,6 +359,7 @@ impl Row {
                 tr("Copy last meeting transcript"),
             ),
             Row::RestoreCapture => label("Restore Last Capture", tr("Restore last capture")),
+            Row::PlannerSteps => label("Today’s Steps", tr("Today's steps")),
             Row::SpeechModel => label("Speech Model", tr("Speech model")),
             Row::Settings => label("Settings…", tr("Settings")),
             Row::Update => update_title(&crate::desktop::host::DesktopUpdateStatus::Checking),
@@ -374,6 +386,7 @@ impl Row {
             Row::CopyLastDictationAudio => sel!(copyLastDictationAudio:),
             Row::CopyLastMeetingTranscript => sel!(copyLastMeetingTranscript:),
             Row::RestoreCapture => sel!(restoreCapture:),
+            Row::PlannerSteps => sel!(togglePlannerSteps:),
             Row::Settings => sel!(openSettings:),
             Row::Update => sel!(checkForUpdates:),
             Row::Quit => sel!(quit:),
@@ -416,6 +429,7 @@ impl Row {
                 | Row::CopyRecentDictation
                 | Row::CopyLastMeetingTranscript
                 | Row::RestoreCapture
+                | Row::PlannerSteps
         )
     }
 }
@@ -533,6 +547,7 @@ struct StatusItemController {
     /// The call links behind the slots now, by slot; `None` is informational.
     upcoming_meetings: RefCell<Vec<Option<CalendarMeeting>>>,
     restore_capture: Retained<NSMenuItem>,
+    planner_steps: Retained<NSMenuItem>,
     update: Option<Retained<NSMenuItem>>,
     update_title: RefCell<String>,
     _menu: Retained<NSMenu>,
@@ -702,6 +717,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
             upcoming_labels: RefCell::new(Vec::new()),
             upcoming_meetings: RefCell::new(Vec::new()),
             restore_capture: row(Row::RestoreCapture),
+            planner_steps: row(Row::PlannerSteps),
             update: (!update_managed).then(|| row(Row::Update)),
             update_title: RefCell::new(Row::Update.title().unwrap_or_default()),
             _menu: menu,
@@ -1010,6 +1026,21 @@ fn refresh_restore_capture() {
     STATUS_ITEM.with(|controller| {
         if let Some(controller) = controller.borrow().as_ref() {
             controller.restore_capture.setHidden(!shown);
+        }
+    });
+}
+
+/// Shows Today's Steps while Labs › Planner is on, as the menu opens, with a
+/// checkmark when the pinned overlay is currently open.
+fn refresh_planner_steps() {
+    let shown = crate::rune_ui::planner::macos::enabled_now();
+    let pinned = shown && crate::rune_ui::planner::macos::peek_pinned_now();
+    STATUS_ITEM.with(|controller| {
+        if let Some(controller) = controller.borrow().as_ref() {
+            controller.planner_steps.setHidden(!shown);
+            controller
+                .planner_steps
+                .setState(if pinned { 1 } else { 0 });
         }
     });
 }
@@ -1339,6 +1370,7 @@ mod tests {
                 "Copy Recent Dictation".into(),
                 "Copy Last Meeting Transcript".into(),
                 "Restore Last Capture".into(),
+                "Today’s Steps".into(),
                 "Speech Model".into(),
                 "—".into(),
                 "Settings…".into(),

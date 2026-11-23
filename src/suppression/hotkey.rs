@@ -239,6 +239,20 @@ impl DictationHotkey {
         matches!(self.state, State::Recording { .. } | State::Locked)
     }
 
+    /// True when this shortcut is bare Option in Hold mode (not Toggle), so
+    /// Labs › Planner shares short Option taps with Today's Steps and defers
+    /// the start tone until the hold registers.
+    pub fn is_bare_option_hold(&self) -> bool {
+        let m = self.binding.modifiers;
+        !self.toggle
+            && self.binding.key_code.is_none()
+            && m.option.is_some()
+            && m.control.is_none()
+            && m.shift.is_none()
+            && m.command.is_none()
+            && !m.function
+    }
+
     /// The cancel shortcut this machine acts on now: only while it records,
     /// in Toggle mode or as an extra row.
     pub fn recording_cancel(&self) -> Option<RuntimeHotkey> {

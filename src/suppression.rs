@@ -410,12 +410,24 @@ pub(crate) fn alpha_shift_now() -> bool {
         != 0
 }
 
-/// Read-only observation; the Planner peek never consumes Option or its chords.
-pub(crate) fn option_held_now() -> bool {
+const LEFT_OPTION_KEY_CODE: u16 = 58;
+const RIGHT_OPTION_KEY_CODE: u16 = 61;
+
+/// Whether only Option is held (no Shift, Command, Control, or non-Option key),
+/// so shortcuts like ⌥⇧V, ⌥⇧S, ⌥←, and Option-typed accents never trigger peek.
+fn option_alone_with(flags: u64, mut key_down: impl FnMut(u16) -> bool) -> bool {
+    (flags & NEUTRAL_BLOCKING_MODIFIERS) == crate::app_settings::OPTION_KEY_MASK
+        && held_key_with(|code| {
+            code != LEFT_OPTION_KEY_CODE && code != RIGHT_OPTION_KEY_CODE && key_down(code)
+        })
+        .is_none()
+}
+
+/// Read-only observation: true only while Option is held by itself.
+pub(crate) fn option_alone_held_now() -> bool {
     // SAFETY: a read-only CoreGraphics state query.
-    (unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) }
-        & crate::app_settings::OPTION_KEY_MASK)
-        != 0
+    let flags = unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) };
+    option_alone_with(flags, input_is_held)
 }
 
 /// The modifier flags that keep a keyboard from reading neutral. Caps Lock's

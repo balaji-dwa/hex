@@ -9,7 +9,7 @@ impl Feature {
     pub const fn description(self) -> &'static str {
         match self {
             Self::Planner => {
-                "A persistent daily plan and seven-day review, saved locally. Open-ended answers need five words; checklist items need three characters. Escape or the subtle bottom-right bypass hides the planner for five minutes."
+                "A focused daily morning ritual and weekly review, saved locally on your Mac. Turns on Launch at login; Escape or Not now snoozes for five minutes. Open Today’s Steps from the menu bar (or with Option when not in Toggle dictation) to check off steps anytime. With Option alone as your Hold dictation key, the start tone waits until the hold registers so taps stay quiet."
             }
             Self::Meetings => "Record calls and keep a written copy (its own pane)",
             Self::VoiceFilter => {

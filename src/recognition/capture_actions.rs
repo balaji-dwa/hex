@@ -14,6 +14,7 @@ pub(super) fn handle_hotkey_action(
     events: &mut EventLog,
     indicator: DictationSink<'_>,
     release: &mut Release,
+    defer_start_tone: bool,
 ) -> Result<bool> {
     match action {
         HotkeyAction::Start => {
@@ -22,8 +23,9 @@ pub(super) fn handle_hotkey_action(
             }
             // This capture remembers the press it started from. The latch
             // clears once the stream is back, but this capture still owes
-            // the tone its cold press deferred.
-            release.begin();
+            // the tone its cold press (or Planner bare-Option tap sharing)
+            // deferred.
+            release.begin_with_deferred_tone(defer_start_tone);
             // Labs › Return to app: this paste goes back to the app in front
             // now, even if another one comes forward while the person talks.
             worker.remember_return_to_app();
@@ -34,8 +36,9 @@ pub(super) fn handle_hotkey_action(
             // no page is read until the capture is held past its threshold.
             context.begin();
             // The tone confirms the press at once; a chord or short tap
-            // retracts it. A released microphone confirms only once it opens.
-            if release.press {
+            // retracts it. A released microphone (or bare-Option Hold mode
+            // with Planner enabled) confirms only once the hold is intentional.
+            if release.deferred_tone {
                 feedback::prepare();
             } else {
                 feedback::play_provisional_start();
@@ -59,7 +62,7 @@ pub(super) fn handle_hotkey_action(
                 device,
                 events,
                 indicator,
-                release.capture,
+                release.take_deferred_tone(),
                 print,
                 raw,
                 None,
@@ -67,6 +70,7 @@ pub(super) fn handle_hotkey_action(
             .map(drop)
         }
         HotkeyAction::Discard(_) | HotkeyAction::Cancel | HotkeyAction::CancelShortcut => {
+            release.deferred_tone = false;
             context.cancel();
             feedback::retract_start();
             #[cfg(hex_capture)]
@@ -88,6 +92,7 @@ pub(super) fn handle_hotkey_action(
         }
         HotkeyAction::PasteLast | HotkeyAction::PasteMeeting => {
             // The paste chord's modifier press started a provisional capture.
+            release.deferred_tone = false;
             context.cancel();
             feedback::retract_start();
             dictation.cancel()?;
@@ -248,6 +253,7 @@ pub(super) fn control_dictation(
                 events,
                 indicator,
                 release,
+                false,
             )?;
             return Ok(ControlReply::done("Cancelled the recording"));
         }
@@ -285,6 +291,7 @@ pub(super) fn control_dictation(
                 events,
                 indicator,
                 release,
+                false,
             )?;
             if accepted {
                 // Labs › YOLO mode never sends a command's capture.
@@ -293,6 +300,7 @@ pub(super) fn control_dictation(
                 // start has no hold threshold to wait for, so its capture is
                 // real now and reads its page at once.
                 context.intend();
+                crate::rune_ui::planner::macos::on_dictation_intentional();
                 make_control_capture_intentional(input, release.press)?;
                 if let Some(print) = print {
                     // However this recording ends, its text comes back here.
