@@ -8,25 +8,28 @@ use serde::{Deserialize, Serialize};
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const MAX_TEXT: usize = 8_192;
 pub(super) const MAX_STEPS: usize = 100;
+pub(super) const RECOMMENDED_MAX_STEPS: usize = 5;
 
 pub(super) fn answer(value: &str) -> bool {
-    value.len() <= MAX_TEXT
-        && value
-            .split_whitespace()
-            .filter(|word| word.chars().any(char::is_alphanumeric))
-            .count()
-            >= 5
+    value.len() <= MAX_TEXT && value.trim().chars().filter(|c| c.is_alphanumeric()).count() >= 3
 }
 
 pub(super) fn task(value: &str) -> bool {
     value.len() <= MAX_TEXT && value.trim().chars().count() >= 3
 }
 
+pub(super) fn plural(count: usize, singular: &str, plural_form: &str) -> String {
+    format!(
+        "{count} {}",
+        if count == 1 { singular } else { plural_form }
+    )
+}
+
 pub(super) fn planning_day(unix_seconds: i64, eastern_offset: i64) -> i64 {
     (unix_seconds + eastern_offset - 6 * 3_600).div_euclid(86_400)
 }
 
-pub(super) fn date_label(day: i64) -> String {
+fn civil_from_day(day: i64) -> (i64, u32, u32) {
     // Inverse of history::stats::days_from_civil, in the ledger's Eastern calendar.
     let day = day + 719_468;
     let era = day.div_euclid(146_097);
@@ -35,10 +38,42 @@ pub(super) fn date_label(day: i64) -> String {
     let year = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let date = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
+    let date = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = (mp + if mp < 10 { 3 } else { -9 }) as u32;
     let year = year + i64::from(month <= 2);
+    (year, month, date)
+}
+
+#[cfg(test)]
+pub(super) fn date_label(day: i64) -> String {
+    let (year, month, date) = civil_from_day(day);
     format!("{year:04}-{month:02}-{date:02}")
+}
+
+pub(super) fn human_date_label(day: i64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_, month, date) = civil_from_day(day);
+    // 1970-01-01 (day 0) was a Thursday (index 4).
+    let weekday = WEEKDAYS[(day + 4).rem_euclid(7) as usize];
+    let month_name = MONTHS[(month.saturating_sub(1) as usize).min(11)];
+    format!("{weekday}, {month_name} {date}")
+}
+
+pub(super) fn short_weekday(day: i64) -> &'static str {
+    const LETTERS: [&str; 7] = ["S", "M", "T", "W", "T", "F", "S"];
+    LETTERS[(day + 4).rem_euclid(7) as usize]
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DayOutcome {
+    Delivered,
+    NotYet,
+    Planned,
+    Skipped,
+    Today,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -63,6 +98,10 @@ pub(super) struct Day {
     pub committed: bool,
     /// Answered at the next reflection, independently of committing a plan.
     pub delivered: Option<bool>,
+    /// Optional note on what got in the way when `delivered == Some(false)`.
+    pub blocker: String,
+    /// Unfinished steps from the previous plan awaiting Keep / Drop triage.
+    pub carry_over: Vec<String>,
 }
 
 impl Day {
@@ -176,6 +215,10 @@ impl Ledger {
         self.days.last_mut().unwrap()
     }
 
+    pub fn day_ref(&self, date: i64) -> Option<&Day> {
+        self.days.iter().find(|day| day.date == date)
+    }
+
     pub fn previous(&self, date: i64) -> Option<&Day> {
         // Opening and bypassing an empty day must not hide the last real plan.
         self.days
@@ -189,22 +232,97 @@ impl Ledger {
             .max_by_key(|day| day.date)
     }
 
-    pub fn carry_forward(&mut self, date: i64) {
+    /// Populates `carry_over` once from the previous plan's unfinished steps so the user can
+    /// explicitly Keep or Drop each item instead of having old tasks pile up silently.
+    pub fn seed_carry_over(&mut self, date: i64) {
         if self.today(date).breakdown_started {
             return;
         }
-        let unfinished: Vec<_> = self
+        let unfinished: Vec<String> = self
             .previous(date)
             .into_iter()
             .flat_map(|day| &day.steps)
-            .filter(|step| !step.done)
-            .cloned()
+            .filter(|step| !step.done && !step.text.trim().is_empty())
+            .map(|step| step.text.clone())
             .collect();
         let today = self.today(date);
-        if today.steps.is_empty() {
-            today.steps = unfinished;
+        if today.steps.is_empty() && today.carry_over.is_empty() {
+            today.carry_over = unfinished;
         }
         today.breakdown_started = true;
+    }
+
+    pub fn keep_carry_over(&mut self, date: i64, index: usize) -> Option<String> {
+        let today = self.today(date);
+        if index >= today.carry_over.len() || today.steps.len() >= MAX_STEPS {
+            return None;
+        }
+        let text = today.carry_over.remove(index);
+        today.steps.push(Step {
+            text: text.clone(),
+            done: false,
+        });
+        Some(text)
+    }
+
+    pub fn drop_carry_over(&mut self, date: i64, index: usize) -> bool {
+        let today = self.today(date);
+        if index >= today.carry_over.len() {
+            return false;
+        }
+        today.carry_over.remove(index);
+        true
+    }
+
+    pub fn keep_all_carry_over(&mut self, date: i64) -> Vec<String> {
+        let today = self.today(date);
+        let available = MAX_STEPS.saturating_sub(today.steps.len());
+        let take = today.carry_over.len().min(available);
+        let kept: Vec<String> = today.carry_over.drain(..take).collect();
+        for text in &kept {
+            today.steps.push(Step {
+                text: text.clone(),
+                done: false,
+            });
+        }
+        kept
+    }
+
+    pub fn drop_all_carry_over(&mut self, date: i64) {
+        self.today(date).carry_over.clear();
+    }
+
+    pub fn toggle_step(&mut self, date: i64, index: usize) -> bool {
+        let Some(day) = self.days.iter_mut().find(|day| day.date == date) else {
+            return false;
+        };
+        let Some(step) = day.steps.get_mut(index) else {
+            return false;
+        };
+        step.done = !step.done;
+        true
+    }
+
+    /// Returns the last 7 calendar days ending on `date`, for the weekly visual strip.
+    pub fn recent_seven_days(&self, date: i64) -> Vec<(i64, DayOutcome)> {
+        ((date - 6)..=date)
+            .map(|d| {
+                let outcome = if d == date {
+                    match self.day_ref(d) {
+                        Some(day) if day.committed => DayOutcome::Planned,
+                        _ => DayOutcome::Today,
+                    }
+                } else {
+                    match self.day_ref(d) {
+                        Some(day) if day.delivered == Some(true) => DayOutcome::Delivered,
+                        Some(day) if day.delivered == Some(false) => DayOutcome::NotYet,
+                        Some(day) if day.committed => DayOutcome::Planned,
+                        _ => DayOutcome::Skipped,
+                    }
+                };
+                (d, outcome)
+            })
+            .collect()
     }
 
     pub fn week_due(&self, date: i64) -> bool {
@@ -234,10 +352,10 @@ impl Ledger {
 
     pub fn finish_week(&mut self, date: i64) -> Result<(), &'static str> {
         let Some(draft) = &self.week_draft else {
-            return Err("Set your weekly focus first");
+            return Err("Set your weekly focus first.");
         };
         if !draft.valid(self.weeks.is_empty()) {
-            return Err("Each answer needs at least five words");
+            return Err("Fill in each field with a short answer before continuing.");
         }
         let mut week = self.week_draft.take().unwrap();
         week.date = date;
@@ -247,15 +365,15 @@ impl Ledger {
 
     pub fn commit(&mut self, date: i64) -> Result<(), &'static str> {
         if self.week_due(date) {
-            return Err("Finish your weekly review first");
+            return Err("Finish your weekly review first.");
         }
         let has_previous = self.previous(date).is_some();
         if has_previous && self.previous(date).unwrap().delivered.is_none() {
-            return Err("Say whether the previous deliverable was completed");
+            return Err("Answer whether you met yesterday's criteria first.");
         }
         let day = self.today(date);
         if !day.valid() {
-            return Err("Answers need five words; add at least one step of three characters");
+            return Err("Add a focus, deliverable, done criteria, and at least one step.");
         }
         day.committed = true;
         Ok(())

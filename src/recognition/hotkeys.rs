@@ -129,6 +129,21 @@ impl Hotkeys {
             .any(DictationHotkey::is_recording)
     }
 
+    /// True only when Planner is enabled and `shortcut` is Dictation or Second
+    /// dictation bound to Option alone in Hold mode — never Raw, CapsLock,
+    /// Toggle, or a non-Option shortcut.
+    pub(super) fn defers_start_tone_for_planner(
+        &self,
+        shortcut: Shortcut,
+        planner_enabled: bool,
+    ) -> bool {
+        planner_enabled
+            && matches!(shortcut, Shortcut::Dictation | Shortcut::Second)
+            && self
+                .machine(shortcut)
+                .is_some_and(DictationHotkey::is_bare_option_hold)
+    }
+
     /// Whether a machine other than `shortcut`'s has a double-tap gesture
     /// waiting to become a recording.
     fn pending_gesture_besides(&self, shortcut: Shortcut) -> bool {
@@ -322,6 +337,22 @@ impl Hotkeys {
         } else {
             false
         }
+    }
+
+    /// Cancels any active shortcut dictation capture (such as when the user
+    /// clicks a task on the Option-key Planner overlay) so releasing the key
+    /// afterward never transcribes or pastes.
+    pub(super) fn cancel_active_capture(&mut self) -> bool {
+        let mut cancelled = false;
+        for shortcut in Shortcut::all() {
+            if let Some(machine) = self.machine_mut(shortcut)
+                && machine.is_recording()
+            {
+                machine.suspend();
+                cancelled = true;
+            }
+        }
+        cancelled
     }
 
     /// Keeps a `hex dictation start --print`'s reply for the recording it
@@ -521,6 +552,32 @@ mod tests {
         assert!(!hotkeys.any_recording());
     }
 
+    /// Clicking a step on the Option-key Planner overlay cancels an active
+    /// Option-hold dictation so releasing Option never transcribes or pastes.
+    #[test]
+    fn cancelling_active_capture_prevents_option_release_from_transcribing() {
+        let base = CaptureInstant::ZERO;
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let mut hotkeys = hotkeys();
+
+        // Hold Option past 300 ms so dictation starts.
+        assert_eq!(
+            hotkeys.process(
+                InputEvent::Flags(crate::app_settings::OPTION_KEY_MASK),
+                at(0)
+            ),
+            [(Shortcut::Dictation, HotkeyAction::Start)]
+        );
+        assert!(hotkeys.any_recording());
+
+        // User clicks a step on the overlay at 450 ms -> cancels dictation.
+        assert!(hotkeys.cancel_active_capture());
+        assert!(!hotkeys.any_recording());
+
+        // Releasing Option afterward emits no Finish (nothing is transcribed or pasted).
+        assert!(hotkeys.process(InputEvent::Flags(0), at(600)).is_empty());
+    }
+
     /// A `hex dictation start --print` recording is finished by the shortcut
     /// itself, and its reply goes with the capture to transcription.
     #[test]
@@ -627,5 +684,76 @@ mod tests {
             printed.recv_timeout(Duration::from_millis(50)),
             Ok(PrintedTranscript::Failed(_))
         ));
+    }
+
+    #[test]
+    fn planner_only_defers_start_tone_for_bare_option_hold_dictation() {
+        let now = CaptureInstant::ZERO;
+        let option = crate::app_settings::HotkeyBinding {
+            modifiers: crate::app_settings::HotkeyModifiers {
+                option: Some(crate::app_settings::ModifierSide::Either),
+                ..Default::default()
+            },
+            key: None,
+        }
+        .runtime();
+        let shift_option = crate::app_settings::HotkeyBinding {
+            modifiers: crate::app_settings::HotkeyModifiers {
+                option: Some(crate::app_settings::ModifierSide::Either),
+                shift: Some(crate::app_settings::ModifierSide::Either),
+                ..Default::default()
+            },
+            key: None,
+        }
+        .runtime();
+        let command = crate::app_settings::HotkeyBinding {
+            modifiers: crate::app_settings::HotkeyModifiers {
+                command: Some(crate::app_settings::ModifierSide::Right),
+                ..Default::default()
+            },
+            key: None,
+        }
+        .runtime();
+
+        let mut hotkeys = hotkeys();
+        hotkeys.second = Some(DictationHotkey::with_binding(false, now, true, command));
+        hotkeys.raw = Some(DictationHotkey::with_binding(
+            false,
+            now,
+            false,
+            shift_option,
+        ));
+
+        assert!(
+            hotkeys.defers_start_tone_for_planner(Shortcut::Dictation, true),
+            "bare-Option Hold dictation defers start tone while Planner is on"
+        );
+        assert!(
+            !hotkeys.defers_start_tone_for_planner(Shortcut::Dictation, false),
+            "Planner off never defers start tone"
+        );
+        assert!(
+            !hotkeys.defers_start_tone_for_planner(Shortcut::Second, true),
+            "non-Option second shortcut keeps its provisional start tone"
+        );
+        assert!(
+            !hotkeys.defers_start_tone_for_planner(Shortcut::Raw, true),
+            "raw shortcut keeps its provisional start tone"
+        );
+        assert!(
+            !hotkeys.defers_start_tone_for_planner(Shortcut::CapsLock, true),
+            "Caps Lock keeps its provisional start tone"
+        );
+
+        // Bare Option in Toggle mode never defers its start tone.
+        hotkeys.dictation.set_toggle(true);
+        assert!(
+            !hotkeys.defers_start_tone_for_planner(Shortcut::Dictation, true),
+            "Toggle mode keeps its provisional start tone"
+        );
+
+        // Second shortcut bound to bare Option in Hold mode also defers.
+        hotkeys.second = Some(DictationHotkey::with_binding(false, now, true, option));
+        assert!(hotkeys.defers_start_tone_for_planner(Shortcut::Second, true));
     }
 }

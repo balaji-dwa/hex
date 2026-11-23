@@ -1,7 +1,8 @@
 //! Native presentation and the timer that also runs with Settings closed.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use objc2::MainThreadOnly;
@@ -16,7 +17,7 @@ use rune::{
 };
 
 use super::{
-    Ledger, Planner,
+    Ledger, OptionPeekMode, Planner, option_peek_mode,
     peek::{self, Peek},
 };
 use crate::app_settings::AppSettings;
@@ -24,10 +25,79 @@ use crate::desktop::login_item::{LoginItemRequest, LoginItemStatus, LoginItemWor
 
 static VISIBLE: AtomicBool = AtomicBool::new(false);
 static OPEN: AtomicBool = AtomicBool::new(false);
+static PEEK_PINNED: AtomicBool = AtomicBool::new(false);
+static INTENTIONAL_DICTATION: AtomicBool = AtomicBool::new(false);
+static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Encoded `OptionPeekMode`: 0 = TapOrHold, 1 = TapOnly, 2 = MenuBarOnly.
+static OPTION_MODE: AtomicU8 = AtomicU8::new(0);
+
+fn encode_option_mode(mode: OptionPeekMode) -> u8 {
+    match mode {
+        OptionPeekMode::TapOrHold => 0,
+        OptionPeekMode::TapOnly => 1,
+        OptionPeekMode::MenuBarOnly => 2,
+    }
+}
+
+pub(crate) fn enabled_now() -> bool {
+    ENABLED.load(Ordering::Acquire)
+}
+
+/// True when a clean Option tap should toggle Today's Steps (any mode except bare-Option Toggle dictation).
+pub(crate) fn option_tap_enabled_now() -> bool {
+    OPTION_MODE.load(Ordering::Acquire) != encode_option_mode(OptionPeekMode::MenuBarOnly)
+}
+
+/// True when Planner is enabled and dictation uses bare Option in Hold mode, so short
+/// Option taps toggle Today's Steps silently while holds >= 300 ms dictate as usual.
+pub(crate) fn bare_option_tap_only_now() -> bool {
+    enabled_now()
+        && OPTION_MODE.load(Ordering::Acquire) == encode_option_mode(OptionPeekMode::TapOnly)
+}
+
+pub(crate) fn peek_pinned_now() -> bool {
+    PEEK_PINNED.load(Ordering::Acquire)
+}
 
 pub(crate) fn open() {
+    PEEK_PINNED.store(false, Ordering::Release);
     OPEN.store(true, Ordering::Release);
     crate::macos_rune::wake_pump();
+}
+
+/// Toggles the pinned Today's Steps overlay from the macOS menu bar without holding Option.
+pub(crate) fn toggle_peek() {
+    let next = !PEEK_PINNED.load(Ordering::Acquire);
+    PEEK_PINNED.store(next, Ordering::Release);
+    crate::macos_rune::wake_pump();
+}
+
+/// Called only once a dictation capture becomes intentional (past the 300 ms
+/// hold threshold or started explicitly via control/API) so provisional Option
+/// taps can close a pinned overlay cleanly without flickering and reopening.
+pub(crate) fn on_dictation_intentional() {
+    INTENTIONAL_DICTATION.store(true, Ordering::Release);
+    if PEEK_PINNED.swap(false, Ordering::AcqRel) {
+        crate::macos_rune::wake_pump();
+    }
+}
+
+/// Clears the active intentional-dictation latch as soon as audio capture ends
+/// (even while transcription/rewriting finishes), so tapping Option right after
+/// dictating opens Today's Steps instead of being dropped.
+pub(crate) fn on_dictation_capture_ended() {
+    if INTENTIONAL_DICTATION.swap(false, Ordering::AcqRel) {
+        crate::macos_rune::wake_pump();
+    }
+}
+
+/// Called from the recognition event tap on the release of a clean single Option
+/// tap (< `OPTION_TAP_MAX`, no other modifier/key/click, and not locking dictation).
+pub(crate) fn on_option_tap() {
+    if VISIBLE.load(Ordering::Acquire) || !option_tap_enabled_now() {
+        return;
+    }
+    toggle_peek();
 }
 
 pub(super) fn visible(value: bool) {
@@ -37,7 +107,10 @@ pub(super) fn visible(value: bool) {
 pub(crate) struct Driver {
     panel: rune::OverlayHandle<Planner>,
     peek: rune::OverlayHandle<Peek>,
-    option: bool,
+    hold_preview: peek::HoldPreviewGate,
+    option_active: bool,
+    dictating: bool,
+    pinned: bool,
     last: Instant,
     enabled: bool,
     loaded: bool,
@@ -80,23 +153,53 @@ pub(crate) fn install<S: 'static>(app: &mut rune::App<S>) -> Driver {
             margin: 44.,
             align: rune::Align::End,
             inset: 20.,
-            interactive: false,
+            interactive: true,
             view: peek::view,
         }
         .options(OverlayOptions {
             display: DisplayTarget::UnderPointer,
-            keys: KeyPolicy::None,
+            keys: KeyPolicy::OnDemand,
             input: OverlayInput::Regions,
             ..Default::default()
         })
         .macos_level(3)
+        .on_key(peek::on_key)
+        .on_focus(peek::on_focus)
         .release_gpu_when_hidden(),
         Peek::default(),
     );
+    let panel_for_toggle = panel.clone();
+    let peek_handle = peek.clone();
+    peek.update(move |state, _| {
+        state.handle = Some(peek_handle);
+        state.on_toggle = Some(Arc::new(move |index| {
+            // Cancel any Option-triggered dictation so releasing Option after
+            // checking a step never transcribes or pastes into the active app.
+            crate::recognition::cancel_shortcut_dictation();
+            panel_for_toggle.update(move |planner, _| {
+                planner.toggle_today_step(index);
+            });
+            crate::macos_rune::wake_pump();
+        }));
+        state.on_open = Some(Arc::new(|| {
+            crate::recognition::cancel_shortcut_dictation();
+            open();
+        }));
+        state.on_pin = Some(Arc::new(|value| {
+            if value {
+                crate::recognition::cancel_shortcut_dictation();
+            }
+            PEEK_PINNED.store(value, Ordering::Release);
+            crate::macos_rune::wake_pump();
+        }));
+    });
     Driver {
         panel,
         peek,
-        option: false,
+        hold_preview: peek::HoldPreviewGate::default(),
+        option_active: false,
+        dictating: false,
+        pinned: false,
         last: Instant::now() - Duration::from_secs(1),
         enabled: false,
         loaded: false,
@@ -111,11 +214,37 @@ impl Driver {
         backdrops(VISIBLE.load(Ordering::Acquire));
         let feature = crate::labs::Feature::Planner;
         let enabled = feature.shipped() && feature.on(settings) && feature.managed().is_none();
-        let option = enabled && crate::suppression::option_held_now();
-        let option_changed = option != self.option;
-        self.option = option;
+        ENABLED.store(enabled, Ordering::Release);
+        let option_mode = option_peek_mode(settings);
+        OPTION_MODE.store(encode_option_mode(option_mode), Ordering::Release);
+        let engine_busy = crate::transcription::engine::dictation_busy();
+        let mut pin_state = peek::PeekPinState {
+            pinned: PEEK_PINNED.load(Ordering::Acquire),
+            intentional_dictation: INTENTIONAL_DICTATION.load(Ordering::Acquire),
+        };
+        let dictating = enabled && pin_state.on_tick(engine_busy);
+        INTENTIONAL_DICTATION.store(pin_state.intentional_dictation, Ordering::Release);
+        if dictating {
+            PEEK_PINNED.store(false, Ordering::Release);
+        }
+        // Only show a temporary hold preview when dictation doesn't use bare Option,
+        // and wait `OPTION_HOLD_DELAY` (== `OPTION_TAP_MAX`, 280 ms) so taps never
+        // cross the preview threshold.
+        let option_raw = enabled
+            && option_mode == OptionPeekMode::TapOrHold
+            && crate::suppression::option_alone_held_now();
+        let now_instant = Instant::now();
+        let prev_option = self.option_active;
+        self.option_active = self.hold_preview.tick(option_raw, now_instant);
+        let option = self.option_active;
+        let pinned = enabled && !dictating && PEEK_PINNED.load(Ordering::Acquire);
+        let peek_trigger_changed =
+            option != prev_option || dictating != self.dictating || pinned != self.pinned;
+        self.dictating = dictating;
+        self.pinned = pinned;
         let manual = OPEN.swap(false, Ordering::AcqRel);
         if !enabled {
+            PEEK_PINNED.store(false, Ordering::Release);
             if self.enabled {
                 Peek::present(&self.peek, Peek::default());
                 self.panel.update(|state, _| {
@@ -157,13 +286,21 @@ impl Driver {
                 self.panel.update(move |state, _| state.login_note = note);
             }
         }
-        if !manual && !option_changed && self.last.elapsed() < Duration::from_secs(1) {
+        // While Option is held or state changed, refresh promptly without waiting the 1s cadence.
+        if !manual
+            && !peek_trigger_changed
+            && !option_raw
+            && self.last.elapsed() < Duration::from_secs(1)
+        {
             return;
         }
-        self.last = Instant::now();
+        self.last = now_instant;
         let now = crate::history::now_ms() / 1_000;
         let date = day_at(now);
         let away = crate::audio::system_idle::released();
+        if away {
+            PEEK_PINNED.store(false, Ordering::Release);
+        }
         let load = !self.loaded;
         self.loaded = true;
         let peek = self.peek.clone();
@@ -179,12 +316,13 @@ impl Driver {
                     Err(error) => {
                         *state = Planner::new(Ledger::default(), date, None);
                         state.unreadable = true;
-                        state.error = Some(format!("Could not read planner.json: {error}. The file was left untouched. Fix it and restart Hex; emergency bypass remains available."));
+                        state.error = Some(format!("Could not read planner.json: {error}. The file was left untouched. Fix it and restart Hex; you can close anytime."));
                     }
                 }
                 state.panel = panel;
                 state.login_note = note;
             }
+            state.option_mode = option_mode;
             if date != state.date {
                 state.save();
                 state.date = date;
@@ -192,14 +330,23 @@ impl Driver {
             }
             if away {
                 if state.visible {
-                    state.save(); state.visible = false; visible(false);
-                    if let Some(panel) = &state.panel { panel.hide(); }
+                    state.save();
+                    state.visible = false;
+                    visible(false);
+                    if let Some(panel) = &state.panel {
+                        panel.hide();
+                    }
                 }
             } else if manual || (!state.visible && state.ledger.due(date, now)) {
+                PEEK_PINNED.store(false, Ordering::Release);
                 state.reveal(manual);
                 tx.focus("planner-content", false);
             }
-            Peek::present(&peek, Peek::snapshot(state, option, away));
+            let pinned_now = PEEK_PINNED.load(Ordering::Acquire);
+            Peek::present(
+                &peek,
+                Peek::snapshot(state, option, away, dictating, pinned_now),
+            );
         });
     }
 }

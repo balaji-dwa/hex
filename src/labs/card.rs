@@ -95,7 +95,7 @@ impl Feature {
     pub const fn summary(self) -> &'static str {
         match self {
             Self::Planner => {
-                "Plan each morning at 6 AM Eastern and review your goals weekly. Enables Launch at login; emergency bypass lasts five minutes."
+                "Plan today’s focus each morning at 6 AM Eastern and review goals weekly. Turns on Launch at login; open Today’s Steps from the menu bar or Option."
             }
             Self::Meetings => "Record calls and keep a written copy",
             Self::VoiceFilter => "A Hex Microphone other apps can pick, with live voice filters",

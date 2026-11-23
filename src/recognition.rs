@@ -38,6 +38,15 @@ mod stop_phrase;
 use capture_actions::{control_dictation, handle_hotkey_action, paste_last};
 use context_watch::ContextWatch;
 use events::handle_dictation_event;
+
+/// Requested by the Option-key Planner overlay when a user clicks a step or
+/// Pin while an Option-triggered dictation is recording, so releasing Option
+/// never transcribes or pastes into the active app.
+static CANCEL_SHORTCUT_DICTATION: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn cancel_shortcut_dictation() {
+    CANCEL_SHORTCUT_DICTATION.store(true, Ordering::Release);
+}
 use guards::{
     Release, WarmRelease, caps_lock_can_press, capture_boundary, capture_refusal, claims_escape,
     paste_last_refusal,
@@ -214,6 +223,7 @@ pub fn listen(
         ),
     );
     hotkeys.configure(CaptureInstant::now());
+    let mut planner_option_tap = crate::rune_ui::planner::peek::OptionTapDetector::default();
     let hud = indicator;
     let caps_lock = crate::caps_lock_dictation::CapsLockDictation::new();
     let indicator = DictationSink {
@@ -329,6 +339,25 @@ pub fn listen(
                 &mut events,
                 indicator,
                 &mut release,
+                false,
+            )?;
+        }
+        if CANCEL_SHORTCUT_DICTATION.swap(false, std::sync::atomic::Ordering::AcqRel)
+            && hotkeys.cancel_active_capture()
+        {
+            handle_hotkey_action(
+                HotkeyAction::Cancel,
+                false,
+                None,
+                input.captured_through(),
+                &input,
+                &dictation_worker,
+                &mut context,
+                &input.device_name(),
+                &mut events,
+                indicator,
+                &mut release,
+                false,
             )?;
         }
         if let Some(controls) = &controls {
@@ -433,6 +462,7 @@ pub fn listen(
                         match input.start_programmatic(boundary) {
                             Ok(()) => {
                                 hotkeys.disarm_pending_gestures();
+                                crate::rune_ui::planner::macos::on_dictation_intentional();
                                 tracing::info!(
                                     dictation_id = id,
                                     source,
@@ -737,6 +767,7 @@ pub fn listen(
                 &mut events,
                 indicator,
                 &mut release,
+                false,
             )?;
         }
         let (next_microphone_revision, microphone) = crate::app_settings::microphone_selection();
@@ -762,6 +793,7 @@ pub fn listen(
                 &mut events,
                 indicator,
                 &mut release,
+                false,
             )?;
         }
         // Caps Lock presses arrive from the tap, off the audio and input
@@ -797,6 +829,7 @@ pub fn listen(
                 &mut events,
                 indicator,
                 &mut release,
+                false,
             )?;
             if !accepted {
                 hotkeys.suspend(Shortcut::CapsLock);
@@ -877,6 +910,12 @@ pub fn listen(
                 hotkeys.track_key_state(input_event, capture_at);
                 continue;
             }
+            let planner_tap_enabled = crate::rune_ui::planner::macos::enabled_now()
+                && crate::rune_ui::planner::macos::option_tap_enabled_now();
+            let defer_option_tap = crate::app_settings::double_tap_lock()
+                && crate::rune_ui::planner::macos::bare_option_tap_only_now();
+            let option_tapped = planner_tap_enabled
+                && planner_option_tap.observe(input_event, capture_at, defer_option_tap);
             for (shortcut, action) in hotkeys.process(input_event, capture_at) {
                 // Only a physical edge from the owner of a shortcut recording.
                 // Control requests also use CancelShortcut, but never come here.
@@ -916,6 +955,18 @@ pub fn listen(
                     hotkeys.raw_capture = shortcut == Shortcut::Raw;
                 }
                 let print = hotkeys.print_for(shortcut, action);
+                // A clean short Option tap (< 280 ms) while Labs › Planner is on
+                // toggles Today's Steps; discard the provisional capture instead
+                // of transcribing stray background audio.
+                let action = if option_tapped && action == HotkeyAction::Finish {
+                    HotkeyAction::Cancel
+                } else {
+                    action
+                };
+                let defer_start_tone = hotkeys.defers_start_tone_for_planner(
+                    shortcut,
+                    crate::rune_ui::planner::macos::enabled_now(),
+                );
                 let accepted = handle_hotkey_action(
                     action,
                     hotkeys.raw_capture,
@@ -928,10 +979,14 @@ pub fn listen(
                     &mut events,
                     indicator,
                     &mut release,
+                    defer_start_tone,
                 )?;
                 if !accepted {
                     hotkeys.suspend(shortcut);
                 }
+            }
+            if option_tapped && !hotkeys.any_recording() {
+                crate::rune_ui::planner::macos::on_option_tap();
             }
         }
         if programmatic.is_none()
@@ -946,12 +1001,23 @@ pub fn listen(
             // The press is a real capture now: read its page once, here
             // rather than on every provisional press. A tap this loop never
             // sees that way asks when it finishes instead. A capture pressed
-            // while the microphone was released still owes its tone here,
-            // even if the stream has come back since.
+            // while the microphone was released (or while bare-Option Hold
+            // mode shares short Option taps with Planner) still owes its tone
+            // here, even if the stream has come back since.
             context.intend();
-            if release.capture {
+            crate::rune_ui::planner::macos::on_dictation_intentional();
+            if release.take_deferred_tone() {
                 feedback::play(Tone::DictationStart);
             }
+        }
+        if !hotkeys.any_recording() && programmatic.is_none() {
+            crate::rune_ui::planner::macos::on_dictation_capture_ended();
+        }
+        if crate::rune_ui::planner::macos::enabled_now()
+            && crate::rune_ui::planner::macos::option_tap_enabled_now()
+            && planner_option_tap.poll_deferred(CaptureInstant::now(), hotkeys.any_recording())
+        {
+            crate::rune_ui::planner::macos::on_option_tap();
         }
         // Only once every queued edge is handled, so a release already seen
         // ends the press first.

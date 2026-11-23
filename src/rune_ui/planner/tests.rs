@@ -3,7 +3,7 @@ use rune::text::TextSystem;
 use rune::{Env, Mods, Runtime};
 
 fn runtime() -> Runtime<Planner> {
-    let state = Planner::new(Ledger::default(), 100, None);
+    let state = Planner::new(Ledger::default(), 20_777, None);
     let text = TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
     let mut rt = super::super::offscreen::runtime(
         state,
@@ -29,53 +29,21 @@ fn enter(rt: &mut Runtime<Planner>) {
     rt.frame(0.01);
 }
 
+fn cmd_enter(rt: &mut Runtime<Planner>) {
+    rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods {
+            cmd: true,
+            ..Default::default()
+        },
+    });
+    rt.frame(0.01);
+}
+
 fn fill(rt: &mut Runtime<Planner>, index: usize, value: &str) {
     rt.state.fields[index] = TextEdit::new(value);
     rt.invalidate();
     rt.frame(0.01);
-}
-
-#[test]
-fn planner_first_week_setup_then_daily_commit_enforces_both_minimums() {
-    let mut rt = runtime();
-    assert_eq!(rt.state.slide, Slide::Goal);
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Goal);
-    for index in [5, 6] {
-        fill(&mut rt, index, "Build a useful personal planning tool");
-    }
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Remaining);
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Focus);
-    for index in [7, 8] {
-        fill(&mut rt, index, "Finish one usable daily planning flow");
-    }
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Success);
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Picture);
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Today);
-    fill(&mut rt, 1, "Make the daily planning overlay usable");
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Breakdown);
-    fill(&mut rt, 9, "ab");
-    // Press the real Add button to exercise its bound validation.
-    tap(&mut rt, "add-step");
-    assert!(rt.state.steps.is_empty());
-    fill(&mut rt, 9, "Implement the daily planning overlay");
-    tap(&mut rt, "add-step");
-    assert_eq!(rt.state.steps.len(), 1);
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Commit);
-    fill(&mut rt, 2, "A working keyboard driven planning overlay");
-    fill(&mut rt, 3, "Every planning slide saves correctly");
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Criteria);
-    enter(&mut rt);
-    assert!(rt.state.ledger.today(100).committed);
-    assert!(!rt.state.visible);
 }
 
 fn tap(rt: &mut Runtime<Planner>, key: &str) {
@@ -86,13 +54,61 @@ fn tap(rt: &mut Runtime<Planner>, key: &str) {
 }
 
 #[test]
+fn planner_first_week_setup_then_daily_commit_shows_day_view_recap() {
+    let mut rt = runtime();
+    rt.state.visible = true;
+    assert_eq!(rt.state.slide, Slide::Goal);
+    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Goal);
+    assert!(rt.state.error.is_some());
+    fill(&mut rt, 5, "Build a calm personal workspace");
+    fill(&mut rt, 6, "Polish the morning planning flow");
+    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Focus);
+    fill(&mut rt, 7, "Ship daily planning");
+    fill(&mut rt, 8, "Use it every morning");
+    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Picture);
+    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Today);
+    fill(&mut rt, 1, "Ship checkable Option todos");
+    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Outcome);
+    fill(&mut rt, 2, "Checkable Option task cards");
+    fill(&mut rt, 3, "Clicking a task checks it off and saves");
+    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Breakdown);
+    fill(&mut rt, 9, "ab");
+    tap(&mut rt, "add-step");
+    assert!(rt.state.steps.is_empty());
+    fill(&mut rt, 9, "Make Option cards interactive");
+    tap(&mut rt, "add-step");
+    assert_eq!(rt.state.steps.len(), 1);
+    tap(&mut rt, "planner-next");
+    assert!(rt.state.ledger.today(20_777).committed);
+    assert_eq!(
+        rt.state.slide,
+        Slide::DayView,
+        "committing lands on the Your Day recap"
+    );
+    assert!(rt.state.visible, "stays visible for closing confirmation");
+    tap(&mut rt, "today-step-0");
+    assert!(
+        rt.state.ledger.today(20_777).steps[0].done,
+        "steps are checkable inside DayView"
+    );
+    tap(&mut rt, "planner-next");
+    assert!(!rt.state.visible, "Start the day closes the planner");
+}
+
+#[test]
 fn planner_bypass_is_pinned_bottom_right_and_saves_a_partial_answer() {
     let mut rt = runtime();
     fill(&mut rt, 5, "unfinished draft");
     rt.state.visible = true;
     let (x, y) = rt.find("planner-bypass").unwrap();
     assert!(
-        x > 850. && y > 700.,
+        x > 800. && y > 700.,
         "subtle bypass stays outside the scrolling form: {x}, {y}"
     );
     tap(&mut rt, "planner-bypass");
@@ -105,21 +121,34 @@ fn planner_bypass_is_pinned_bottom_right_and_saves_a_partial_answer() {
 }
 
 #[test]
-fn planner_escape_always_dismisses_even_if_the_file_cannot_be_saved() {
+fn planner_escape_exits_editor_first_and_always_dismisses_on_second_press() {
     let mut rt = runtime();
     rt.state.unreadable = true;
     rt.state.visible = true;
+    tap(&mut rt, "answer-5");
     rt.key(KeyEvent {
         key: Key::Escape,
         mods: Mods::default(),
     });
     rt.frame(0.01);
-    assert!(!rt.state.visible);
+    assert!(
+        rt.state.visible,
+        "first Escape exits the focused editor without aborting the flow"
+    );
+    rt.key(KeyEvent {
+        key: Key::Escape,
+        mods: Mods::default(),
+    });
+    rt.frame(0.01);
+    assert!(
+        !rt.state.visible,
+        "second Escape dismisses even if unreadable"
+    );
     assert!(rt.state.ledger.weeks.is_empty());
 }
 
 #[test]
-fn planner_arrows_edit_text_and_enter_adds_a_checklist_item() {
+fn planner_arrows_edit_text_and_enter_in_step_does_not_skip_slide() {
     let mut rt = runtime();
     tap(&mut rt, "answer-5");
     rt.key(KeyEvent {
@@ -136,9 +165,17 @@ fn planner_arrows_edit_text_and_enter_adds_a_checklist_item() {
         rt.state.fields[5].text,
         "Build a useful personal planning tool"
     );
-    rt.state.slide = Slide::Breakdown;
+    rt.state = fixture(Slide::Breakdown);
     rt.invalidate();
+    rt.settle_all();
     rt.frame(0.01);
+    tap(&mut rt, "step-field-0");
+    enter(&mut rt);
+    assert_eq!(
+        rt.state.slide,
+        Slide::Breakdown,
+        "Enter inside an existing step never accidentally commits"
+    );
     tap(&mut rt, "new-step");
     rt.key(KeyEvent {
         key: Key::Text("Write the smallest complete change".into()),
@@ -146,162 +183,253 @@ fn planner_arrows_edit_text_and_enter_adds_a_checklist_item() {
     });
     enter(&mut rt);
     assert_eq!(rt.state.slide, Slide::Breakdown);
-    assert_eq!(rt.state.steps.len(), 1);
-}
-
-#[test]
-fn planner_open_questions_are_single_large_editors_without_word_counts() {
-    let mut rt = runtime();
-    for slide in [
-        Slide::Goal,
-        Slide::Remaining,
-        Slide::Focus,
-        Slide::Success,
-        Slide::Reflection,
-        Slide::Today,
-        Slide::Commit,
-        Slide::Criteria,
-    ] {
-        rt.state.slide = slide;
-        rt.invalidate();
-        rt.settle_all();
-        rt.frame(0.01);
-        let fields: Vec<_> = rt
-            .elements()
-            .into_iter()
-            .filter(|element| {
-                element.path.contains("/question-") && element.path.ends_with("/input")
-            })
-            .collect();
-        assert_eq!(fields.len(), 1, "one editor on {slide:?}");
-        let area = rt
-            .elements()
-            .into_iter()
-            .find(|element| {
-                element.path.contains("/question-")
-                    && element
-                        .path
-                        .rsplit('/')
-                        .next()
-                        .is_some_and(|key| key.starts_with("answer-"))
-            })
-            .unwrap();
-        assert!(area.rect[3] > 150., "room to think on {slide:?}");
-        let copy: Vec<_> = rt
-            .elements()
-            .into_iter()
-            .filter_map(|element| element.text)
-            .collect();
-        assert!(!copy.iter().any(|copy| copy.contains("words ·")
-            || copy.contains("At least 5")
-            || copy.contains("Dictate into")));
-    }
-    rt.state.slide = Slide::Goal;
-    rt.invalidate();
-    rt.frame(0.01);
-    tap(&mut rt, "answer-5");
-    rt.paste("Build a calm and dependable workspace");
-    rt.key(KeyEvent {
-        key: Key::Enter,
-        mods: Mods {
-            shift: true,
-            ..Default::default()
-        },
-    });
-    rt.frame(0.01);
-    assert!(rt.state.fields[5].text.contains('\n'));
-    assert_eq!(rt.state.slide, Slide::Goal);
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Remaining);
-}
-
-#[test]
-fn planner_breakdown_has_no_checkboxes_and_uses_yesterdays_unfinished_steps() {
-    let mut rt = runtime();
-    rt.state = fixture(Slide::Today);
-    // Yesterday's first task is checked, its second task remains unchecked.
-    rt.state.ledger.today(rt.state.date).steps.clear();
-    rt.state.steps.clear();
-    rt.invalidate();
-    rt.settle_all();
-    rt.frame(0.01);
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Breakdown);
-    assert_eq!(rt.state.steps.len(), 1);
-    assert_eq!(rt.state.steps[0].text, "Test an interrupted write");
-    assert!(rt.find("check-0").is_none());
-    let tree = rt.accessibility_json();
-    assert!(!tree.to_string().contains("\"check-box\""));
-    let elements = rt.elements();
-    let saved = elements
-        .iter()
-        .find(|element| element.path.ends_with("/step-field-0"))
-        .unwrap();
-    let add = elements
-        .iter()
-        .find(|element| element.path.ends_with("/new-step"))
-        .unwrap();
-    assert_eq!(saved.rect[0], add.rect[0]);
-    assert_eq!(saved.rect[2], add.rect[2]);
-    rt.state.slide = Slide::YesterdayTasks;
-    rt.invalidate();
-    rt.settle_all();
-    rt.frame(0.01);
-    assert!(rt.find("previous-step-0").is_some());
-    assert!(
-        rt.accessibility_json()
-            .to_string()
-            .contains("\"check-box\"")
+    assert_eq!(rt.state.steps.len(), 4);
+    cmd_enter(&mut rt);
+    assert_eq!(
+        rt.state.slide,
+        Slide::DayView,
+        "Cmd+Enter commits from Breakdown"
     );
 }
 
 #[test]
-fn planner_yesterdays_deliverable_and_tasks_are_separate_choice_only_pages() {
+fn planner_yesterday_merges_criteria_blocker_and_steps_then_triages_carry_over() {
     let mut rt = runtime();
-    rt.state = fixture(Slide::Picture);
+    rt.state = fixture(Slide::Yesterday);
     rt.state.ledger.today(20_776).delivered = None;
     rt.state.ledger.today(rt.state.date).steps.clear();
+    rt.state.ledger.today(rt.state.date).breakdown_started = false;
     rt.state.steps.clear();
     rt.invalidate();
     rt.settle_all();
     rt.frame(0.01);
-    enter(&mut rt);
-    assert_eq!(rt.state.slide, Slide::Yesterday);
     assert!(rt.find("delivered-yes").is_some());
-    assert!(rt.find("previous-step-0").is_none());
-    assert!(rt.find("new-step").is_none());
-    assert!(
-        !rt.elements()
-            .iter()
-            .any(|element| element.path.contains("/question-"))
-    );
+    assert!(rt.find("delivered-no").is_some());
+    assert!(rt.find("previous-step-0").is_some());
+    assert!(rt.find("blocker-input").is_none());
+
     tap(&mut rt, "delivered-no");
-    assert_eq!(rt.state.slide, Slide::YesterdayTasks);
     assert_eq!(
-        rt.state.ledger.previous(rt.state.date).unwrap().delivered,
-        Some(false)
+        rt.state.slide,
+        Slide::Yesterday,
+        "selecting Not yet stays on slide so user can note blocker and check steps"
     );
-    assert!(rt.find("new-step").is_none());
     assert!(
-        !rt.elements()
-            .iter()
-            .any(|element| element.path.contains("/question-"))
+        rt.find("blocker-input").is_some(),
+        "Not yet reveals optional blocker prompt"
     );
-    tap(&mut rt, "previous-step-1");
     tap(&mut rt, "planner-next");
     assert_eq!(rt.state.slide, Slide::Today);
     tap(&mut rt, "planner-next");
+    assert_eq!(rt.state.slide, Slide::Outcome);
+    tap(&mut rt, "planner-next");
     assert_eq!(rt.state.slide, Slide::Breakdown);
     assert!(
-        rt.state.steps.is_empty(),
-        "both of yesterday's tasks are now checked"
+        rt.find("carry-over-triage").is_some(),
+        "unfinished yesterday steps appear in triage instead of silently filling steps"
+    );
+    assert!(rt.state.steps.is_empty());
+    tap(&mut rt, "keep-carry-0");
+    assert_eq!(rt.state.steps.len(), 1);
+    assert_eq!(rt.state.steps[0].text, "Test an interrupted write");
+    assert!(rt.find("carry-over-triage").is_none());
+}
+
+#[test]
+fn planner_yes_done_checks_all_yesterday_steps_and_edit_plan_rolls_back_on_cancel() {
+    let mut rt = runtime();
+    rt.state = fixture(Slide::Yesterday);
+    rt.state.ledger.today(20_776).delivered = None;
+    rt.state.ledger.today(20_776).steps[1].done = false;
+    rt.invalidate();
+    rt.frame(0.01);
+    tap(&mut rt, "delivered-yes");
+    assert!(
+        rt.state.ledger.today(20_776).steps.iter().all(|s| s.done),
+        "choosing Yes, done marks yesterday's steps complete"
+    );
+    tap(&mut rt, "delivered-no");
+    assert!(
+        !rt.state.ledger.today(20_776).steps[1].done,
+        "switching to Not yet restores yesterday's unchecked steps"
+    );
+    tap(&mut rt, "delivered-yes");
+    tap(&mut rt, "previous-step-1");
+    assert_eq!(
+        rt.state.ledger.today(20_776).delivered,
+        Some(false),
+        "unchecking a step while Yes, done is selected flips status to Not yet"
+    );
+
+    // Pressing Enter in an empty new-step field commits when valid steps exist.
+    rt.state = fixture(Slide::Breakdown);
+    rt.state.visible = true;
+    rt.invalidate();
+    rt.frame(0.01);
+    tap(&mut rt, "new-step");
+    enter(&mut rt);
+    assert_eq!(
+        rt.state.slide,
+        Slide::DayView,
+        "Enter in empty new-step commits when at least one step exists"
+    );
+
+    // Editing a committed plan uses a backup copy and rolls back safely on Escape.
+    rt.state = fixture(Slide::DayView);
+    rt.state.visible = true;
+    rt.invalidate();
+    rt.frame(0.01);
+    let original_steps = rt.state.ledger.today(20_777).steps.clone();
+    tap(&mut rt, "planner-edit");
+    assert_eq!(rt.state.slide, Slide::Today);
+    assert!(rt.state.edit_backup.is_some());
+    rt.state.slide = Slide::Breakdown;
+    rt.state.steps.clear();
+    rt.state.ledger.today(20_777).steps.clear();
+    rt.invalidate();
+    rt.frame(0.01);
+    rt.key(KeyEvent {
+        key: Key::Escape,
+        mods: Mods::default(),
+    });
+    rt.frame(0.01);
+    assert_eq!(rt.state.slide, Slide::DayView);
+    assert!(rt.state.edit_backup.is_none());
+    assert_eq!(
+        rt.state.ledger.today(20_777).steps,
+        original_steps,
+        "cancelling edit restores the committed plan intact"
+    );
+}
+
+#[test]
+fn planner_detects_bare_option_dictation_hotkey_and_moves_focus_on_enter() {
+    let mut settings = crate::app_settings::AppSettings {
+        shortcut_mode: crate::dictation::ShortcutMode::Hold,
+        dictation_hotkey: crate::app_settings::HotkeyBinding {
+            modifiers: crate::app_settings::HotkeyModifiers {
+                option: Some(crate::app_settings::ModifierSide::Either),
+                ..Default::default()
+            },
+            key: None,
+        },
+        ..Default::default()
+    };
+    assert!(dictation_uses_bare_option(&settings));
+    assert_eq!(option_peek_mode(&settings), OptionPeekMode::TapOnly);
+
+    // Bare Option in Toggle mode reserves Option taps for Toggle dictation.
+    settings.shortcut_mode = crate::dictation::ShortcutMode::Toggle;
+    assert_eq!(option_peek_mode(&settings), OptionPeekMode::MenuBarOnly);
+
+    // Non-bare-Option shortcut (e.g. Option+Shift) supports both tap and hold peek.
+    settings.shortcut_mode = crate::dictation::ShortcutMode::Hold;
+    settings.dictation_hotkey.modifiers.shift = Some(crate::app_settings::ModifierSide::Either);
+    assert!(!dictation_uses_bare_option(&settings));
+    assert_eq!(option_peek_mode(&settings), OptionPeekMode::TapOrHold);
+
+    // Adaptive Yesterday footer hint reflects selection and blocker-note focus.
+    let mut rt = runtime();
+    rt.state = fixture(Slide::Yesterday);
+    rt.state.ledger.today(20_776).delivered = None;
+    rt.invalidate();
+    rt.frame(0.01);
+    let hint_text = |rt: &Runtime<Planner>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("slide-shortcut-hint"))
+            .and_then(|e| e.text)
+            .unwrap_or_default()
+    };
+    assert_eq!(hint_text(&rt), "Choose Yes or Not yet to continue");
+    tap(&mut rt, "delivered-yes");
+    assert_eq!(hint_text(&rt), "Enter to continue");
+    tap(&mut rt, "delivered-no");
+    assert_eq!(hint_text(&rt), "Enter to continue");
+    rt.settle_all();
+    rt.frame(1.0);
+    tap(&mut rt, "blocker-input");
+    rt.frame(0.01);
+    assert!(
+        rt.state.fields[0].focused,
+        "clicking blocker-input should focus fields[0]"
+    );
+    assert_eq!(hint_text(&rt), "Enter to continue");
+
+    // Enter on first field of a two-field slide moves to the second field without inserting a newline.
+    rt.state = fixture(Slide::Outcome);
+    rt.invalidate();
+    rt.frame(0.01);
+    let before = rt.state.fields[2].text.clone();
+    tap(&mut rt, "answer-2");
+    enter(&mut rt);
+    assert_eq!(rt.state.slide, Slide::Outcome);
+    assert_eq!(rt.state.fields[2].text, before, "no stray newline inserted");
+
+    // Weekly review (Progress) and Goal keep the exact same header Y with zero layout jump.
+    rt.state = fixture(Slide::Progress);
+    rt.invalidate();
+    rt.frame(0.01);
+    let progress_y = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("planner-card"))
+        .unwrap()
+        .rect[1];
+    let progress_bottom = {
+        let r = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("planner-card"))
+            .unwrap()
+            .rect;
+        r[1] + r[3]
+    };
+    rt.state = fixture(Slide::Goal);
+    rt.invalidate();
+    rt.frame(0.01);
+    let goal_y = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("planner-card"))
+        .unwrap()
+        .rect[1];
+    assert_eq!(progress_y, goal_y, "card header never jumps between slides");
+    assert!(
+        progress_bottom < 720.,
+        "weekly review card fits cleanly inside 1024x768 without clipping: {progress_bottom}"
+    );
+
+    // Yesterday slide with Not yet + blocker input + 3 steps fits cleanly inside 1024x768.
+    rt.state = fixture(Slide::Yesterday);
+    rt.state.ledger.today(20_776).delivered = Some(false);
+    rt.state.ledger.today(20_776).steps.push(model::Step {
+        text: "Verify dark and light screenshots".into(),
+        done: false,
+    });
+    rt.invalidate();
+    rt.frame(0.01);
+    let yesterday_rect = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("planner-card"))
+        .unwrap()
+        .rect;
+    assert_eq!(
+        yesterday_rect[1], goal_y,
+        "Yesterday card keeps same header Y"
+    );
+    assert!(
+        yesterday_rect[1] + yesterday_rect[3] < 720.,
+        "Yesterday card with blocker and 3 steps fits cleanly inside 1024x768: {}",
+        yesterday_rect[1] + yesterday_rect[3]
     );
 }
 
 #[test]
 fn planner_failed_save_never_marks_a_week_complete() {
     let mut rt = runtime();
-    rt.state.slide = Slide::Success;
+    rt.state.slide = Slide::Focus;
     for index in 5..=8 {
         fill(&mut rt, index, "Build a useful personal planning tool");
     }
@@ -309,28 +437,23 @@ fn planner_failed_save_never_marks_a_week_complete() {
     enter(&mut rt);
     assert!(rt.state.ledger.weeks.is_empty());
     assert!(rt.state.ledger.week_draft.is_some());
-    assert_eq!(rt.state.slide, Slide::Success);
+    assert_eq!(rt.state.slide, Slide::Focus);
 }
 
 #[test]
 fn planner_weekly_review_requires_reflection_and_then_returns_to_daily_planning() {
     let mut state = fixture(Slide::Progress);
     state.restore();
+    assert_eq!(state.slide, Slide::Progress);
     let mut tx = Tx::default();
+    state.fields[4] = TextEdit::new("");
     state.advance(&mut tx);
-    assert_eq!(state.slide, Slide::Reflection);
-    state.fields[4] = TextEdit::new("one two three four");
-    state.advance(&mut tx);
-    assert_eq!(state.slide, Slide::Reflection);
-    state.fields[4] = TextEdit::new("Smaller steps helped me finish work");
+    assert_eq!(state.slide, Slide::Progress);
+    state.fields[4] = TextEdit::new("Smaller steps helped me ship");
     state.advance(&mut tx);
     assert_eq!(state.slide, Slide::Goal);
     state.advance(&mut tx);
-    assert_eq!(state.slide, Slide::Remaining);
-    state.advance(&mut tx);
     assert_eq!(state.slide, Slide::Focus);
-    state.advance(&mut tx);
-    assert_eq!(state.slide, Slide::Success);
     state.advance(&mut tx);
     assert_eq!(state.slide, Slide::Picture);
     assert_eq!(state.ledger.weeks.len(), 2);
@@ -340,20 +463,24 @@ fn planner_weekly_review_requires_reflection_and_then_returns_to_daily_planning(
 }
 
 #[test]
-fn planner_is_an_opt_in_macos_lab_and_a_failed_daily_save_stays_incomplete() {
+fn planner_is_an_opt_in_macos_lab_and_reopen_opens_day_view() {
     let feature = crate::labs::Feature::Planner;
     let settings = crate::app_settings::AppSettings::default();
     assert!(!feature.on(&settings));
     assert_eq!(feature.oses(), &[crate::labs::Os::Macos]);
-    let mut state = fixture(Slide::Criteria);
+    let mut state = fixture(Slide::Breakdown);
     state.unreadable = true;
     state.advance(&mut Tx::default());
     assert!(!state.ledger.today(state.date).committed);
     state.unreadable = false;
     state.advance(&mut Tx::default());
     assert!(state.ledger.today(state.date).committed);
+    assert_eq!(state.slide, Slide::DayView);
+    state.close_committed();
+    assert!(!state.visible);
     state.reveal(true);
-    assert_eq!(state.slide, Slide::Breakdown);
+    assert_eq!(state.slide, Slide::DayView);
+    assert!(state.reopened);
     state.dismiss(1_000);
     assert!(!state.ledger.due(state.date, 1_000));
 }
@@ -382,7 +509,9 @@ fn planner_saved_answers_wrap_within_the_content_column() {
             Slide::Picture,
             Slide::Progress,
             Slide::Yesterday,
+            Slide::Outcome,
             Slide::Breakdown,
+            Slide::DayView,
         ] {
             let mut state = fixture(slide);
             let week = state.ledger.weeks.last_mut().unwrap();
@@ -390,9 +519,11 @@ fn planner_saved_answers_wrap_within_the_content_column() {
             week.focus = answer.clone();
             week.remaining = answer.clone();
             week.success = answer.clone();
-            state.ledger.days[0].deliverable = answer.clone();
-            state.ledger.days[0].criteria = answer.clone();
+            state.ledger.today(20_776).deliverable = answer.clone();
+            state.ledger.today(20_776).criteria = answer.clone();
             state.fields[1] = TextEdit::new(&answer);
+            state.fields[2] = TextEdit::new(&answer);
+            state.fields[3] = TextEdit::new(&answer);
             let text = TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
             let mut rt = super::super::offscreen::runtime(
                 state,
@@ -433,34 +564,44 @@ fn planner_saved_answers_wrap_within_the_content_column() {
 fn fixture(slide: Slide) -> Planner {
     let mut ledger = Ledger::default();
     let week = model::Week {
-        date: if matches!(
-            slide,
-            Slide::Progress
-                | Slide::Reflection
-                | Slide::Goal
-                | Slide::Remaining
-                | Slide::Focus
-                | Slide::Success
-        ) {
+        date: if matches!(slide, Slide::Progress | Slide::Goal | Slide::Focus) {
             20_770
         } else {
             20_777
         },
-        reflection: "Small steps helped me finish important work".into(),
+        reflection: "Small morning steps kept scope tight and helped me finish".into(),
         goal: "Build a calm and dependable voice workspace".into(),
         remaining: "Finish the planner and verify the experience".into(),
         focus: "Ship the smallest useful daily planning flow".into(),
-        success: "Complete morning planning entirely with the keyboard".into(),
+        success: "Complete morning planning in under three minutes".into(),
     };
     ledger.weeks.push(week.clone());
     ledger.week_draft = Some(week);
+    ledger.days.push(model::Day {
+        date: 20_774,
+        deliverable: "Draft the planner ledger".into(),
+        committed: true,
+        delivered: Some(true),
+        steps: vec![model::Step {
+            text: "Write schema".into(),
+            done: true,
+        }],
+        ..Default::default()
+    });
+    ledger.days.push(model::Day {
+        date: 20_775,
+        deliverable: "Prototype daily slides".into(),
+        committed: true,
+        delivered: Some(false),
+        ..Default::default()
+    });
     ledger.days.push(model::Day {
         date: 20_776,
         problem: "Make saved plans survive an app restart".into(),
         deliverable: "A working local ledger with durable saves".into(),
         criteria: "Drafts and bypass timers survive a restart".into(),
         committed: true,
-        delivered: Some(true),
+        delivered: Some(slide != Slide::Yesterday),
         steps: vec![
             model::Step {
                 text: "Save the ledger atomically".into(),
@@ -475,17 +616,23 @@ fn fixture(slide: Slide) -> Planner {
     });
     ledger.days.push(model::Day {
         date: 20_777,
-        yesterday: "I finished the planner ledger and persistence checks".into(),
         problem: "Make the daily planning overlay feel effortless".into(),
-        deliverable: "A usable keyboard driven morning planning flow".into(),
-        criteria: "Every slide saves correctly and accepts dictation".into(),
+        deliverable: "A clean morning planning flow with checkable Option tasks".into(),
+        criteria: "Every slide is scannable and Option clicks persist immediately".into(),
+        committed: slide == Slide::DayView,
+        breakdown_started: true,
+        carry_over: if slide == Slide::Breakdown {
+            vec!["Test an interrupted write".into()]
+        } else {
+            Vec::new()
+        },
         steps: vec![
             model::Step {
                 text: "Build the daily slides".into(),
                 done: true,
             },
             model::Step {
-                text: "Verify keyboard navigation and input minimums".into(),
+                text: "Make Option task cards checkable".into(),
                 done: false,
             },
             model::Step {
@@ -523,18 +670,14 @@ fn planner_renders() {
     for dark in [false, true] {
         for (name, slide) in [
             ("progress", Slide::Progress),
-            ("reflection", Slide::Reflection),
             ("goal", Slide::Goal),
-            ("remaining", Slide::Remaining),
             ("focus", Slide::Focus),
-            ("success", Slide::Success),
             ("picture", Slide::Picture),
             ("yesterday", Slide::Yesterday),
-            ("yesterday-tasks", Slide::YesterdayTasks),
             ("today", Slide::Today),
+            ("outcome", Slide::Outcome),
             ("breakdown", Slide::Breakdown),
-            ("commit", Slide::Commit),
-            ("criteria", Slide::Criteria),
+            ("day-view", Slide::DayView),
         ] {
             let text = TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
             let mut rt = super::super::offscreen::runtime(
