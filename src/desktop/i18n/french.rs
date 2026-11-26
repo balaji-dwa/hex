@@ -15,6 +15,23 @@ pub(super) fn table() -> &'static HashMap<&'static str, &'static str> {
 
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("Team sign-in", "Connexion à l’équipe"),
+    ("Sign in with your team Google account to sync Hex context later", "Connectez-vous avec le compte Google de votre équipe pour synchroniser le contexte de Hex ultérieurement"),
+    ("Sign in with Google", "Se connecter avec Google"),
+    ("Finish sign-in in your browser…", "Terminez la connexion dans votre navigateur…"),
+    ("Signed in as {}", "Connecté en tant que {}"),
+    ("Sign out", "Se déconnecter"),
+    ("Checking team session…", "Vérification de la session d’équipe…"),
+    ("Sign-in canceled.", "Connexion annulée."),
+    ("Team sign-in is configured incorrectly.", "La connexion à l’équipe est mal configurée."),
+    ("Couldn't reach team sign-in. Try again.", "Impossible de joindre le service de connexion à l’équipe. Réessayez."),
+    ("Couldn't verify the browser response. Try again.", "Impossible de vérifier la réponse du navigateur. Réessayez."),
+    ("Couldn't open your browser.", "Impossible d’ouvrir votre navigateur."),
+    ("Sign-in timed out. Try again.", "Le délai de connexion a expiré. Réessayez."),
+    ("Sign-in was declined.", "La connexion a été refusée."),
+    ("Couldn't verify your team account. Try again.", "Impossible de vérifier votre compte d’équipe. Réessayez."),
+    ("Your team session expired. Sign in again.", "Votre session d’équipe a expiré. Reconnectez-vous."),
+    ("Couldn't access the saved team session.", "Impossible d’accéder à la session d’équipe enregistrée."),
     ("Planner", "Planificateur"),
     ("Plan today’s focus each morning at 6 AM Eastern and review goals weekly. Turns on Launch at login; open Today’s Steps from the menu bar or Option.", "Planifiez votre priorité chaque matin à 6 h, heure de l’Est, et faites le point chaque semaine. Active le lancement à la connexion ; ouvrez Étapes du jour depuis la barre des menus ou avec Option."),
     ("Sent to", "Envoyé à"),

@@ -2235,7 +2235,7 @@ fn hud_lab_picks_dot_scope_processing_placement_and_level() {
 
 #[test]
 fn labs_lists_every_toggle_off_by_default() {
-    let mut rt = runtime("mac-production", true, (980.0, 2000.0));
+    let mut rt = runtime("mac-production", true, (980.0, 2400.0));
     rt.state.settings.experimental.hex_microphone = false;
     rt.state.platform.hex_microphone = None;
     refresh(&mut rt);
@@ -2515,6 +2515,61 @@ fn stop_phrase_shows_its_phrase_on_its_card_while_on() {
     tap(&mut rt, "lab-stop-phrase");
     assert!(!rt.state.settings.labs.stop_phrase);
     assert!(rt.find("stop-phrase-text").is_none());
+}
+
+#[test]
+fn team_auth_card_shows_the_controls_for_each_state_while_enabled() {
+    use crate::labs::Feature;
+    use crate::team_auth::{AuthError, AuthState};
+
+    let mut rt = runtime("mac-labs", true, (980.0, 4000.0));
+    rt.update(|ui, _| ui.lab_store.group = Some(Feature::TeamAuth.group()));
+    settle(&mut rt);
+    assert!(!rt.state.settings.labs.team_auth);
+    assert!(rt.find("team-auth-sign-in").is_none());
+    tap(&mut rt, "lab-team-auth");
+    assert!(rt.state.settings.labs.team_auth);
+    assert!(rt.find("team-auth-sign-in").is_some());
+
+    rt.update(|ui, _| ui.lab_store.team_auth.state = AuthState::SigningIn { started_at_ms: 42 });
+    settle(&mut rt);
+    assert!(rt.find("team-auth-cancel").is_some());
+    assert!(
+        texts(&rt)
+            .iter()
+            .any(|text| text == "Finish sign-in in your browser…")
+    );
+
+    rt.update(|ui, _| {
+        ui.lab_store.team_auth.state = AuthState::SignedIn {
+            email: "nick@dwa1.com".into(),
+            member_sub: "member-id".into(),
+            expires_at_ms: None,
+        };
+    });
+    settle(&mut rt);
+    assert!(rt.find("team-auth-sign-out").is_some());
+    assert!(
+        texts(&rt)
+            .iter()
+            .any(|text| text == "Signed in as nick@dwa1.com")
+    );
+
+    let reason = AuthError::Refresh.message();
+    rt.update(|ui, _| {
+        ui.lab_store.team_auth.state = AuthState::NeedsReauth {
+            last_email: Some("nick@dwa1.com".into()),
+            reason: reason.into(),
+        };
+    });
+    settle(&mut rt);
+    assert!(rt.find("team-auth-sign-in").is_some());
+    assert!(texts(&rt).iter().any(|text| text == reason));
+
+    tap(&mut rt, "lab-team-auth");
+    assert!(!rt.state.settings.labs.team_auth);
+    assert!(rt.find("team-auth-status").is_none());
+    assert!(rt.find("team-auth-sign-in").is_none());
 }
 
 #[test]

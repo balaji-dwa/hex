@@ -218,6 +218,8 @@ pub struct LabsSettings {
     /// The local API's `timestamps=segment|word` returns the speech model's
     /// own segment and word times.
     pub api_timestamps: bool,
+    /// Team sign-in (macOS Dev lab).
+    pub team_auth: bool,
     /// Web pages from `api_browser_origins` may call Hex's local API from
     /// the browser (Labs › Browser access to the local API).
     pub api_browser_access: bool,
@@ -430,6 +432,7 @@ impl Default for LabsSettings {
             paste_last_picker: false,
             api_processing: false,
             api_timestamps: false,
+            team_auth: false,
             api_browser_access: false,
             api_browser_origins: Vec::new(),
             speakers_only: false,

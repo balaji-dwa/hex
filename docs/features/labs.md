@@ -51,6 +51,7 @@ not on pull requests; the live page is unverified until a deploy.
 Feature             Pane  Toggle (settings.json, hex settings)   On: what it does
 ├── Planner         yes   labs.planner                (macOS)   Full-screen daily planning at 6 AM Eastern, weekly review, local drafts, five-minute emergency bypass; enables Launch at login. See planner.md.
 ├── Meetings (beta) yes   meetings.enabled             (macOS)   Meetings joins the sidebar: call detection, recording, transcripts
+├── Team sign-in (Dev) no labs.team_auth                 (macOS)   Sign in with a team Google account from the Meetings group, verify membership, and sign out
 ├── Voice Filter (Dev) yes experimental.hex_microphone (macOS, Linux) Voice Filter joins the sidebar; feeds the Hex Microphone (macOS driver, Linux PipeWire source)
 │                                        a stable build never feeds it; with the macOS driver installed it keeps the pane with Uninstall alone
 ├── Playground (Dev) yes  labs.playground                        a Playground sidebar item and ⇧⌘D open the story browser
@@ -3633,6 +3634,24 @@ Checks: `the_passwd_line_for_the_uid_names_its_home`,
 running OpenCode inside WSL, including whether the UNC read starts the
 distribution and whether Annotate's send reaches it. The
 `windows-labs` golden shows the new card.
+
+Team sign-in (`team-auth`, macOS Dev builds) is off by default.
+Settings › Labs › Meetings opens Google sign-in in the default browser.
+Hex checks the callback and verifies the signed-in member with
+`/api/hex/whoami`. While the lab is on, visiting Labs checks the saved
+session and refreshes it if it is about to expire or the server rejects
+the access token. Sign out removes the local session. Hex keeps credentials
+in a separate owner-only `hex-auth/session.json` beside its Application
+Support folder, outside the personal installer's backup. The test build
+uses `hex-auth-test/session.json`; an isolated support directory uses
+`hex-auth-session.json`. Turning the lab off cancels work in progress and
+keeps the saved session for next time.
+
+Checks: [team_auth/tests.rs](../../src/team_auth/tests.rs) exercises the
+OAuth flow, refresh, cancellation, and sign-out against loopback servers.
+`team_auth_card_shows_the_controls_for_each_state_while_enabled` in
+[panes.rs](../../src/rune_ui/tests/panes.rs) exercises the card. A real
+Google sign-in through the team's Cloudflare Access tenant remains unverified.
 
 Only on speakers (`speakers-only`, every OS)
 puts "While dictating" behind the default output. While on, each dictation

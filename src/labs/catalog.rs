@@ -13,7 +13,9 @@ impl Feature {
             // Developer tools: the story browser, and the virtual microphone
             // (a stable build keeps only its Uninstall while the driver is
             // installed).
-            Self::VoiceFilter | Self::Playground | Self::PasteLastPicker => Audience::Dev,
+            Self::VoiceFilter | Self::Playground | Self::PasteLastPicker | Self::TeamAuth => {
+                Audience::Dev
+            }
             Self::Meetings
             | Self::LiveText
             | Self::FailureNotices
@@ -97,6 +99,7 @@ impl Feature {
     /// The day it joined Labs, as `yyyymmdd`. Labs marks the newest as New.
     pub const fn added(self) -> u32 {
         match self {
+            Self::TeamAuth => 20261126,
             Self::Planner => 20261120,
             Self::Meetings
             | Self::VoiceFilter
@@ -279,6 +282,7 @@ impl Feature {
             | Self::CalendarMenu
             | Self::CalendarSelectAll
             | Self::PasteLastPicker
+            | Self::TeamAuth
             | Self::Planner => MACOS,
             Self::CleanUpWithAppleIntelligence => MACOS,
             Self::CopyOnly => MACOS_WINDOWS,
@@ -390,6 +394,7 @@ impl Feature {
             Self::OpenCodeInWsl => "opencode-in-wsl",
             Self::ApiProcessing => "api-processing",
             Self::ApiTimestamps => "api-timestamps",
+            Self::TeamAuth => "team-auth",
             Self::ApiBrowserAccess => "api-browser-access",
             Self::SpeakersOnly => "speakers-only",
             Self::PauseMenu => "pause-menu",
@@ -476,6 +481,7 @@ impl Feature {
             Self::OpenCodeInWsl => "labs.opencode_in_wsl",
             Self::ApiProcessing => "labs.api_processing",
             Self::ApiTimestamps => "labs.api_timestamps",
+            Self::TeamAuth => "labs.team_auth",
             Self::ApiBrowserAccess => "labs.api_browser_access",
             Self::SpeakersOnly => "labs.speakers_only",
             Self::PauseMenu => "labs.pause_menu",

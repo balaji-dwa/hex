@@ -114,6 +114,7 @@ impl Feature {
             | Self::GnomeMeetingCapsules
             | Self::MeetingImport
             | Self::CalendarMenu
+            | Self::TeamAuth
             | Self::CalendarSelectAll => Group::Meetings,
             Self::Screenshots
             | Self::AnnotateReplay

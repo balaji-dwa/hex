@@ -69,6 +69,7 @@ impl Feature {
             Self::OpenCodeInWsl => "OpenCode in WSL",
             Self::ApiProcessing => "Process API transcripts",
             Self::ApiTimestamps => "Timestamps in API transcripts",
+            Self::TeamAuth => "Team sign-in",
             Self::ApiBrowserAccess => "Browser access to the local API",
             Self::SpeakersOnly => "Only on speakers",
             Self::MoreDictationShortcuts => "More dictation shortcuts",
@@ -263,6 +264,7 @@ impl Feature {
             Self::ApiTimestamps => {
                 "Apps that use Hex's local API can ask when each word or phrase starts and ends"
             }
+            Self::TeamAuth => self.description(),
             Self::ApiBrowserAccess => {
                 "Let web pages from the addresses you list use Hex's local API. They still need the API token"
             }

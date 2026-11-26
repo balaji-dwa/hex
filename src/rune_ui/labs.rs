@@ -12,6 +12,8 @@ mod group;
 pub(super) mod screenshots;
 mod stop_phrase;
 mod store;
+#[cfg(any(target_os = "macos", test))]
+pub(super) mod team_auth;
 mod voice_prompt;
 mod yolo_mode;
 
@@ -237,6 +239,9 @@ pub(super) struct Store {
     /// The lab a `hex://labs/<feature>` link named and when, so its card
     /// shows a focus border for [`FLASH`].
     pub(super) flash: Option<(&'static str, std::time::Instant)>,
+    /// Labs › Team sign-in's background worker and state, on macOS (and tests).
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) team_auth: team_auth::Card,
 }
 
 /// How long a linked lab's card keeps its focus border.
@@ -431,6 +436,25 @@ fn open(ui: &mut Ui, tx: &mut Tx) {
     ui.lab_store
         .sync_origins(&ui.settings.labs.api_browser_origins);
     tx.settle();
+}
+
+/// Labs › Team sign-in's settings hook, on macOS (and in tests).
+pub(super) fn settings_changed(ui: &mut Ui) {
+    #[cfg(any(target_os = "macos", test))]
+    team_auth::settings_changed(ui);
+    #[cfg(not(any(target_os = "macos", test)))]
+    let _ = ui;
+}
+
+/// Labs › Team sign-in's background check, on macOS (and in tests).
+pub(super) fn poll_team_auth(ui: &mut Ui, tx: &mut Tx) -> bool {
+    #[cfg(any(target_os = "macos", test))]
+    return team_auth::poll(ui, tx);
+    #[cfg(not(any(target_os = "macos", test)))]
+    {
+        let _ = (ui, tx);
+        false
+    }
 }
 
 /// ⌘F (Ctrl+F off macOS) on the Labs page puts the caret in its search.
@@ -706,6 +730,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
     rows.push(row(Feature::CopyDictationAudio, None));
     if caps.os == super::platform::Os::Macos {
         rows.push(row(Feature::Planner, Some(Pane::Planner.icon())));
+        rows.push(row(Feature::TeamAuth, None));
     }
     // The picker is a Mac gesture and History; elsewhere neither exists.
     if caps.os == super::platform::Os::Macos {
@@ -945,6 +970,7 @@ fn row_key(lab: Lab) -> &'static str {
         Feature::YoloMode => "lab-yolo-mode",
         Feature::ApiProcessing => "lab-api-processing",
         Feature::ApiTimestamps => "lab-api-timestamps",
+        Feature::TeamAuth => "lab-team-auth",
         Feature::ApiBrowserAccess => "lab-api-browser-access",
         Feature::SpeakersOnly => "lab-speakers-only",
         Feature::KeepMicrophoneOpen => "lab-keep-microphone-open",
@@ -1091,6 +1117,8 @@ fn extras(ui: &Ui, p: Paint, entry: &Row, layer: &mut Vec<El>) -> Option<El> {
         Lab::Feature(Feature::VoicePrompt) => Some(voice_prompt::body(ui, p)),
         Lab::Feature(Feature::StopPhrase) => Some(stop_phrase::body(ui, p)),
         Lab::Feature(Feature::ApiBrowserAccess) => Some(browser_access::body(ui, p)),
+        #[cfg(any(target_os = "macos", test))]
+        Lab::Feature(Feature::TeamAuth) => Some(team_auth::body(ui, p)),
         // Wayland reports no file drags, so its card offers the file dialog.
         Lab::Feature(Feature::DropTranscribe) => Some(super::drop_transcribe::card(p)),
         #[cfg(all(target_os = "macos", hex_capture))]

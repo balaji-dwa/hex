@@ -187,6 +187,7 @@ impl Feature {
             Self::ApiTimestamps => {
                 "Let apps using Hex's local API ask when each word or phrase starts and ends, as the speech model heard them"
             }
+            Self::TeamAuth => "Sign in with your team Google account to sync Hex context later",
             Self::ApiBrowserAccess => {
                 "Let web pages from the addresses you list call Hex's local API from the browser; every request still needs the API token"
             }

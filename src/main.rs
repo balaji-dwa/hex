@@ -76,6 +76,8 @@ mod screenshots;
 mod shortcut_pause;
 #[cfg(target_os = "macos")]
 mod suppression;
+#[cfg(any(target_os = "macos", test))]
+mod team_auth;
 mod transcription;
 mod updater;
 #[cfg(target_os = "windows")]

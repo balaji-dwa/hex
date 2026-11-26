@@ -927,6 +927,7 @@ impl Ui {
     /// Meetings turned off forgets its view: turning it back on lists the
     /// recordings.
     fn settings_changed(&mut self) {
+        labs::settings_changed(self);
         if !meetings::available(self) {
             self.meetings.view = meetings::View::Recordings;
         }
@@ -1415,6 +1416,7 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     {
         changed |= labs::screenshots::poll(ui);
     }
+    changed |= labs::poll_team_auth(ui, tx);
     changed |= drop_transcribe::poll(ui);
     changed |= found::poll(ui);
     let login_unknown = ui.platform.login_item.is_none();

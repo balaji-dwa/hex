@@ -4,6 +4,14 @@
 
 use super::*;
 
+/// Team sign-in uses the settings the window already holds. An off switch
+/// needs no session lookup or runtime settings load.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn team_auth(settings: &AppSettings) -> bool {
+    let feature = Feature::TeamAuth;
+    feature.on(settings) && feature.on_this_os() && feature.shipped() && feature.managed().is_none()
+}
+
 /// Live text: provisional words beside the HUD (read as each dictation starts).
 pub fn live_text() -> bool {
     on(LIVE_TEXT)

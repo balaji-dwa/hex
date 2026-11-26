@@ -67,6 +67,7 @@ pub enum Feature {
     OpenCodeInWsl,
     ApiProcessing,
     ApiTimestamps,
+    TeamAuth,
     ApiBrowserAccess,
     SpeakersOnly,
     CalendarMenu,
@@ -88,7 +89,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Self; 80] = [
+    pub const ALL: [Self; 81] = [
         Self::Planner,
         Self::Meetings,
         Self::VoiceFilter,
@@ -151,6 +152,7 @@ impl Feature {
         Self::OpenCodeInWsl,
         Self::ApiProcessing,
         Self::ApiTimestamps,
+        Self::TeamAuth,
         Self::ApiBrowserAccess,
         Self::SpeakersOnly,
         Self::CalendarMenu,

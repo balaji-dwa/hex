@@ -15,6 +15,23 @@ pub(super) fn table() -> &'static HashMap<&'static str, &'static str> {
 
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("Team sign-in", "Login da equipe"),
+    ("Sign in with your team Google account to sync Hex context later", "Entre com a conta do Google da sua equipe para sincronizar o contexto do Hex mais tarde"),
+    ("Sign in with Google", "Entrar com o Google"),
+    ("Finish sign-in in your browser…", "Conclua o login no navegador…"),
+    ("Signed in as {}", "Sessão iniciada como {}"),
+    ("Sign out", "Sair"),
+    ("Checking team session…", "Verificando a sessão da equipe…"),
+    ("Sign-in canceled.", "Login cancelado."),
+    ("Team sign-in is configured incorrectly.", "O login da equipe está configurado incorretamente."),
+    ("Couldn't reach team sign-in. Try again.", "Não foi possível acessar o login da equipe. Tente novamente."),
+    ("Couldn't verify the browser response. Try again.", "Não foi possível verificar a resposta do navegador. Tente novamente."),
+    ("Couldn't open your browser.", "Não foi possível abrir o navegador."),
+    ("Sign-in timed out. Try again.", "O tempo para fazer login acabou. Tente novamente."),
+    ("Sign-in was declined.", "O login foi recusado."),
+    ("Couldn't verify your team account. Try again.", "Não foi possível verificar sua conta de equipe. Tente novamente."),
+    ("Your team session expired. Sign in again.", "Sua sessão de equipe expirou. Entre novamente."),
+    ("Couldn't access the saved team session.", "Não foi possível acessar a sessão de equipe salva."),
     ("Planner", "Planejador"),
     ("Plan today’s focus each morning at 6 AM Eastern and review goals weekly. Turns on Launch at login; open Today’s Steps from the menu bar or Option.", "Planeje seu foco do dia todas as manhãs às 6h do horário do Leste e revise suas metas semanalmente. Ativa a abertura ao iniciar sessão; abra Passos de hoje pela barra de menus ou com Option."),
     ("Sent to", "Enviado para"),

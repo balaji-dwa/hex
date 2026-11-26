@@ -650,6 +650,11 @@ pub(super) const KEYS: &[Key] = &[
          in a transcript, as the speech model heard them (timestamps=segment|word)",
     ),
     key(
+        "labs.team_auth",
+        Kind::Bool,
+        "Labs: sign in with your team Google account (macOS dev builds)",
+    ),
+    key(
         "labs.api_browser_access",
         Kind::Bool,
         "Labs: web pages from the origins in labs.api_browser_origins can call Hex's local API \

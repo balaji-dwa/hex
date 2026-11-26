@@ -15,6 +15,23 @@ pub(super) fn table() -> &'static HashMap<&'static str, &'static str> {
 
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("Team sign-in", "Вход в команду"),
+    ("Sign in with your team Google account to sync Hex context later", "Войдите в аккаунт Google своей команды, чтобы позже синхронизировать контекст Hex"),
+    ("Sign in with Google", "Войти через Google"),
+    ("Finish sign-in in your browser…", "Завершите вход в браузере…"),
+    ("Signed in as {}", "Вы вошли как {}"),
+    ("Sign out", "Выйти"),
+    ("Checking team session…", "Проверяем сеанс команды…"),
+    ("Sign-in canceled.", "Вход отменён."),
+    ("Team sign-in is configured incorrectly.", "Вход в команду настроен неправильно."),
+    ("Couldn't reach team sign-in. Try again.", "Не удалось связаться со службой входа в команду. Повторите попытку."),
+    ("Couldn't verify the browser response. Try again.", "Не удалось проверить ответ браузера. Повторите попытку."),
+    ("Couldn't open your browser.", "Не удалось открыть браузер."),
+    ("Sign-in timed out. Try again.", "Время ожидания входа истекло. Повторите попытку."),
+    ("Sign-in was declined.", "Во входе отказано."),
+    ("Couldn't verify your team account. Try again.", "Не удалось проверить аккаунт команды. Повторите попытку."),
+    ("Your team session expired. Sign in again.", "Сеанс команды истёк. Войдите снова."),
+    ("Couldn't access the saved team session.", "Не удалось получить доступ к сохранённому сеансу команды."),
     ("Planner", "Планировщик"),
     ("Plan today’s focus each morning at 6 AM Eastern and review goals weekly. Turns on Launch at login; open Today’s Steps from the menu bar or Option.", "Планируйте фокус дня каждое утро в 6:00 по восточному времени США и проверяйте цели еженедельно. Включает запуск при входе; открывайте «Шаги на сегодня» из строки меню или клавишей Option."),
     ("Sent to", "Отправлено в"),
