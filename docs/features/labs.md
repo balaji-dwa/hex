@@ -4746,17 +4746,48 @@ Settings › Labs › Meetings opens Google sign-in in the default browser.
 Hex discovers the OAuth resource from Cloudflare Access's challenge and
 sends it with the authorization and code exchange requests. Hex checks
 the callback and verifies the signed-in member with
-`/api/hex/whoami`. While the lab is on, visiting Labs checks the saved
-session and refreshes it if it is about to expire or the server rejects
-the access token. Sign out removes the local session. Hex keeps credentials
+`/api/hex/whoami`. While the lab is on, Hex checks the saved session at
+launch (window open or not) and again when the access token is due, and
+refreshes it if it is about to expire or the server rejects the access
+token. Concurrent rejections share one refresh: whoever holds the refresh
+lock re-reads the saved session and refreshes only if no one else has.
+Sign out removes the local session. Hex keeps credentials
 in a separate owner-only `hex-auth/session.json` beside its Application
 Support folder, outside the personal installer's backup. The test build
 uses `hex-auth-test/session.json`; an isolated support directory uses
 `hex-auth-session.json`. Turning the lab off cancels work in progress and
 keeps the saved session for next time.
 
+Slippy (part of Team sign-in, macOS): signed in with an `@dwa1.com`
+account, Hex can send work to Slippy at `/api/hex/tasks*` on the same
+origin, with the same bearer (a 401 or an Access login redirect refreshes
+once and resends the same body, so its idempotency key). After a pasted
+dictation a small pill offers **Send to Slippy** for 4 seconds (paused
+under the pointer), after the paste, so dictation's latency is unchanged;
+History rows offer it too. The finished Annotate capsule has a **Slippy**
+button (`Action::SendSlippy`, never an OpenCode send, Undo, or rule) that
+sends the bundle's contact sheet and words, and the screenshot editor has
+**Slippy** (`Out::Slippy`): a screenshot's edited PNG, or a recording's
+contact sheet, with the spoken words and no movie path. Images are shrunk
+to a 2,560 px long edge and at most 4 MiB. A Slippy tab lists the
+member's own tasks, with a thread and a follow-up field. One worker
+polls every 5 s while the tab is open or a task runs, else every 60 s;
+it posts a notification when a task finishes, fails, or waits on you,
+once per change, from a per-account `0o600` cursor beside the session
+seeded at first sign-in (so nothing earlier notifies). A click opens
+`hex://slippy/<ts>`. Signing out, an expired session, or turning the lab
+off stops the worker and clears its tasks at once.
+
 Checks: [team_auth/tests.rs](../../src/team_auth/tests.rs) exercises the
-OAuth flow, refresh, cancellation, and sign-out against loopback servers.
+OAuth flow, refresh, cancellation, and sign-out against loopback servers,
+and the single shared refresh under concurrent rejections.
+[slippy/tests.rs](../../src/slippy/tests.rs) checks the four endpoints'
+requests and answers against a loopback origin, the notification cursor,
+sign-out, image shrinking, and annotation bundles;
+[labs/slippy/tests.rs](../../src/rune_ui/labs/slippy/tests.rs) checks that
+the tab, History action, and capsule button need the lab and a member.
+Not yet observed: the live `/api/hex/tasks*` routes, and a notification
+from an installed, signed Hex.
 `team_auth_card_shows_the_controls_for_each_state_while_enabled` in
 [panes.rs](../../src/rune_ui/tests/panes.rs) exercises the card. The team's
 live Cloudflare Access tenant served discovery, accepted loopback client
