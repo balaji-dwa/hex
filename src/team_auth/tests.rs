@@ -748,3 +748,67 @@ fn respond(
     }
     write!(stream, "\r\n{data}").unwrap();
 }
+
+/// Sequential authorized requests reuse one keep-alive connection instead
+/// of a new TCP (and, at the real origin, TLS) handshake each.
+#[test]
+fn authorized_requests_share_one_kept_alive_connection() {
+    use std::sync::atomic::AtomicUsize;
+    let fixture = TempDir::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (accepted, stopped) = (connections.clone(), stop.clone());
+    let server = thread::spawn(move || {
+        for stream in listener.incoming() {
+            if stopped.load(Ordering::Acquire) {
+                break;
+            }
+            let Ok(mut stream) = stream else { continue };
+            accepted.fetch_add(1, Ordering::AcqRel);
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    // One request: its line and headers (GETs have no body).
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+                    );
+                }
+            });
+        }
+    });
+    let client = test_client(
+        fixture.0.join("session.json"),
+        &format!("http://{address}"),
+        "member-sub",
+        "access-0",
+    );
+    let cancelled = AtomicBool::new(false);
+    for path in [
+        "/api/hex/tasks",
+        "/api/hex/tasks/1",
+        "/api/hex/tasks/1/files/F1",
+    ] {
+        let mut response = client
+            .send_authorized("member-sub", path, None, &cancelled)
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.body_mut().read_to_vec().unwrap(), b"{}");
+    }
+    assert_eq!(connections.load(Ordering::Acquire), 1);
+    drop(client);
+    stop.store(true, Ordering::Release);
+    let _ = TcpStream::connect(address);
+    server.join().unwrap();
+}

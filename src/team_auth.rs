@@ -9,8 +9,8 @@ mod tests;
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use session::StoredSession;
@@ -73,6 +73,10 @@ pub(crate) struct Client {
     store: PathBuf,
     origin: Url,
     client_id: Option<String>,
+    /// Keep-alive agents for [`send_authorized`](Self::send_authorized)'s
+    /// GETs and POSTs, so a poll's requests share one TLS connection.
+    gets: OnceLock<ureq::Agent>,
+    posts: OnceLock<ureq::Agent>,
 }
 
 impl Client {
@@ -96,6 +100,8 @@ impl Client {
             store,
             origin: oauth::origin(origin)?,
             client_id: client_id.filter(|id| !id.is_empty()),
+            gets: OnceLock::new(),
+            posts: OnceLock::new(),
         })
     }
 
@@ -184,10 +190,13 @@ impl Client {
         if refresh_due(&session) {
             session = self.refresh(&session, cancelled)?;
         }
-        let agent = oauth::agent_with_timeout(
-            &url,
-            Duration::from_secs(if body.is_some() { 45 } else { 12 }),
-        );
+        let (agent, seconds) = if body.is_some() {
+            (&self.posts, 45)
+        } else {
+            (&self.gets, 12)
+        };
+        let agent = agent
+            .get_or_init(|| oauth::agent_with_timeout(&self.origin, Duration::from_secs(seconds)));
         let send = |session: &StoredSession| {
             check_cancelled(cancelled)?;
             let bearer = format!("Bearer {}", session.access_token);
@@ -226,7 +235,7 @@ impl Client {
         for byte in digest.iter() {
             let _ = write!(name, "{byte:02x}");
         }
-        self.store.with_extension(format!("{name}.json"))
+        name
     }
 
     fn load_member(&self, member_sub: &str) -> Result<StoredSession, AuthError> {
