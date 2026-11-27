@@ -1,4 +1,4 @@
-use rune::{Cursor, Cx, El, ScrollSpec, TextStyle, Tx, col, el, icon, row, text};
+use rune::{Cursor, Cx, El, ScrollSpec, Tx, col, el, icon, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, TextArea};
 use rune_theme_opencode::icons;
 
@@ -455,7 +455,7 @@ pub(super) fn view(planner: &Planner, cx: &mut Cx<Planner>) -> El {
                     text(heading_title)
                         .role("heading")
                         .level(1)
-                        .font(TextStyle::new(26., 600.).lh(32.))
+                        .font(crate::rune_ui::controls::PLANNER_HEADING)
                         .color(p.text()),
                 )
                 .child(text(subtitle).font(p.k.ty.ui).color(p.muted()).wrap()),

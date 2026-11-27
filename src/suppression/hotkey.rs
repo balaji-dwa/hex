@@ -16,7 +16,9 @@ pub enum HotkeyAction {
     /// or Escape while a Hold capture is held.
     CancelShortcut,
     PasteLast,
-    PasteMeeting,
+    /// Labs › Model switch shortcut: swap the dictation model with the saved
+    /// other one. It records nothing and ends no capture.
+    ModelSwitch,
 }
 
 impl HotkeyAction {
@@ -138,14 +140,94 @@ const HOLD_THROUGH_KEYS: fn() -> bool = if cfg!(test) {
     crate::labs::hold_through_keys
 };
 
-/// How long a modifier-only shortcut is held before a key joining it is meant
-/// for the app in front rather than a chord (Labs › Hold through other keys).
-/// The Windows hook holds the same second in its `hold_through` module.
-const HOLD_THROUGH_KEYS_AFTER: Duration = Duration::from_secs(1);
+/// Labs › Confirm long cancels. Unit tests keep it off; its policy has its
+/// own tests (`dictation::cancel_confirm`).
+const CONFIRM_LONG_CANCELS: fn() -> bool = if cfg!(test) {
+    || false
+} else {
+    crate::labs::confirm_long_cancels
+};
+
+/// Keys and modifier sides currently tracked as held down, with when each went
+/// down. Kept together so every clear resets keys and modifier sides alike.
+#[derive(Default)]
+struct HeldKeys {
+    keys: HashMap<u16, CaptureInstant>,
+    sides: HashMap<u64, CaptureInstant>,
+}
+
+impl HeldKeys {
+    fn clear(&mut self) {
+        self.keys.clear();
+        self.sides.clear();
+    }
+
+    fn clear_sides(&mut self) {
+        self.sides.clear();
+    }
+
+    fn update_sides(&mut self, flags: u64, at: CaptureInstant) {
+        for mask in MODIFIER_SIDE_MASKS {
+            if flags & mask == 0 {
+                self.sides.remove(&mask);
+            } else {
+                self.sides.entry(mask).or_insert(at);
+            }
+        }
+    }
+
+    fn recover(&mut self, sampled_flags: u64) {
+        self.keys.clear();
+        self.sides.retain(|&mask, _| sampled_flags & mask != 0);
+    }
+
+    /// Records a key press at `at`; returns `true` when the key was not already
+    /// tracked as down.
+    fn press(&mut self, code: u16, at: CaptureInstant) -> bool {
+        let fresh = !self.keys.contains_key(&code);
+        self.keys
+            .entry(code)
+            .and_modify(|down_at| *down_at = (*down_at).max(at))
+            .or_insert(at);
+        fresh
+    }
+
+    fn release(&mut self, code: u16) {
+        self.keys.remove(&code);
+    }
+
+    fn retain_keys(&mut self, mut keep: impl FnMut(&u16) -> bool) {
+        self.keys.retain(|code, _| keep(code));
+    }
+
+    fn contains_key(&self, code: u16) -> bool {
+        self.keys.contains_key(&code)
+    }
+
+    fn keys_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    fn key_count(&self) -> usize {
+        self.keys.len()
+    }
+
+    fn key_codes(&self) -> impl Iterator<Item = &u16> {
+        self.keys.keys()
+    }
+
+    fn key_down_at(&self, code: u16) -> Option<CaptureInstant> {
+        self.keys.get(&code).copied()
+    }
+
+    fn side_down_at(&self, mask: u64) -> Option<CaptureInstant> {
+        self.sides.get(&mask).copied()
+    }
+}
 
 pub struct DictationHotkey {
     state: State,
-    pressed_keys: HashSet<u16>,
+    held: HeldKeys,
     double_tap_enabled: bool,
     double_tap_only: bool,
     /// Press to start, press again to finish: releasing locks the capture.
@@ -153,6 +235,10 @@ pub struct DictationHotkey {
     /// Cancel works in every trigger mode, not only under Toggle: an extra
     /// dictation shortcut has its own mode and always takes its cancel key.
     cancel_in_any_mode: bool,
+    /// Labs › Middle mouse dictation: Escape cancels this machine's
+    /// hands-free capture in every trigger mode, and the tap keeps it from
+    /// the app in front.
+    escape_cancels_lock: bool,
     /// Labs › Tap or hold, read at each Toggle release: a press held past
     /// the hold threshold finishes on release instead of locking.
     tap_or_hold: fn() -> bool,
@@ -163,6 +249,12 @@ pub struct DictationHotkey {
     /// modifier-only capture: a second or more in, the key is the app's, not a
     /// chord.
     hold_through_keys: fn() -> bool,
+    /// Labs › Confirm long cancels, read at each cancel press: a long
+    /// capture's first press asks instead of cancelling.
+    confirm_long_cancels: fn() -> bool,
+    /// When this machine's capture started, and a cancel press waiting for
+    /// its second.
+    cancel_confirm: crate::dictation::cancel_confirm::CancelConfirm,
     binding: RuntimeHotkey,
     /// Toggle's cancel shortcut; `None` in Hold mode.
     cancel: Option<RuntimeHotkey>,
@@ -178,11 +270,6 @@ pub struct DictationHotkey {
     // When the held modifier-only press Hex owns is due its chord breaker.
     chord_break_at: Option<CaptureInstant>,
     modifier_history: ModifierHistory,
-    // When each tracked key last went down.
-    key_down_at: HashMap<u16, CaptureInstant>,
-    // When each modifier key (by its device flag) went down, for chords
-    // that hold both sides of one.
-    side_down_at: HashMap<u64, CaptureInstant>,
     physical: PhysicalKeyboard,
 }
 
@@ -211,14 +298,17 @@ impl DictationHotkey {
             } else {
                 State::IDLE
             },
-            pressed_keys: HashSet::new(),
+            held: HeldKeys::default(),
             double_tap_enabled,
             double_tap_only: false,
             toggle: false,
             cancel_in_any_mode: false,
+            escape_cancels_lock: false,
             tap_or_hold: TAP_OR_HOLD,
             double_tap_modifiers: DOUBLE_TAP_MODIFIERS,
             hold_through_keys: HOLD_THROUGH_KEYS,
+            confirm_long_cancels: CONFIRM_LONG_CANCELS,
+            cancel_confirm: Default::default(),
             binding,
             cancel: None,
             ignore_before: None,
@@ -229,8 +319,6 @@ impl DictationHotkey {
             physical_key_downs: VecDeque::new(),
             chord_break_at: None,
             modifier_history: ModifierHistory::reset(CaptureInstant::ZERO),
-            key_down_at: HashMap::new(),
-            side_down_at: HashMap::new(),
             physical: PhysicalKeyboard::SESSION,
         }
     }
@@ -271,10 +359,17 @@ impl DictationHotkey {
                 if now.duration_since(started_at) >= MINIMUM_HOLD_DURATION)
     }
 
+    /// Labs › Middle mouse dictation's cancel: Escape while this machine
+    /// records hands-free, whichever input locked it.
+    fn escape_cancels_locked(&self) -> bool {
+        self.escape_cancels_lock && self.is_locked()
+    }
+
     /// Whether the tap keeps Escape from the app in front at `now`: it
-    /// cancels this machine's held capture.
+    /// cancels this machine's held capture, or its hands-free one while
+    /// Labs › Middle mouse dictation is on.
     pub fn takes_escape(&self, now: CaptureInstant) -> bool {
-        self.escape_cancels_hold(now)
+        self.escape_cancels_hold(now) || self.escape_cancels_locked()
     }
 
     /// An Escape a recording machine saw and did nothing with, and why.
@@ -324,6 +419,7 @@ impl DictationHotkey {
         self.state = State::IDLE;
         self.stale_keys_neutral_since = None;
         self.chord_break_at = None;
+        self.cancel_confirm.ended();
         Some(HotkeyAction::Finish)
     }
 
@@ -374,6 +470,12 @@ impl DictationHotkey {
         self.cancel_in_any_mode = enabled;
     }
 
+    /// Whether Escape cancels a hands-free capture in every trigger mode
+    /// (Labs › Middle mouse dictation).
+    pub fn set_escape_cancels_lock(&mut self, enabled: bool) {
+        self.escape_cancels_lock = enabled;
+    }
+
     /// Toggle's or an extra shortcut's cancel shortcut, or `None` for no
     /// cancel.
     pub fn set_cancel(&mut self, cancel: Option<RuntimeHotkey>) {
@@ -399,11 +501,10 @@ impl DictationHotkey {
         self.function_modifier = (now, None);
         self.modifier_history = ModifierHistory::reset(now);
         self.state = State::IDLE;
-        self.pressed_keys.clear();
-        self.key_down_at.clear();
-        self.side_down_at.clear();
+        self.held.clear();
         self.stale_keys_neutral_since = None;
         self.chord_break_at = None;
+        self.cancel_confirm.ended();
         was_recording.then_some(HotkeyAction::Cancel)
     }
 
@@ -415,10 +516,10 @@ impl DictationHotkey {
             return false;
         }
         self.state = State::Locked;
-        self.pressed_keys.clear();
-        self.key_down_at.clear();
+        self.held.clear();
         self.stale_keys_neutral_since = None;
         self.chord_break_at = None;
+        self.cancel_confirm.started(std::time::Instant::now());
         true
     }
 
@@ -435,6 +536,7 @@ impl DictationHotkey {
             CapsAction::Start => self.lock().then_some(HotkeyAction::Start),
             CapsAction::Finish => {
                 self.state = State::IDLE;
+                self.held.clear();
                 self.stale_keys_neutral_since = None;
                 self.chord_break_at = None;
                 Some(HotkeyAction::Finish)
@@ -489,7 +591,7 @@ impl DictationHotkey {
             State::Dirty => true,
             // A lock captures while the keyboard sits idle. A missed key-up would
             // otherwise block the fresh shortcut press that finishes it.
-            State::Idle { .. } | State::Locked => !self.pressed_keys.is_empty() || stale_modifiers,
+            State::Idle { .. } | State::Locked => !self.held.keys_empty() || stale_modifiers,
             _ => false,
         };
         if !recoverable {
@@ -500,12 +602,11 @@ impl DictationHotkey {
         // Avoid a full scan when a tracked key is still physically held.
         let sampled_flags = flags();
         if sampled_flags & modifiers_mask != 0
-            || (!self.pressed_keys.is_empty()
-                && self.pressed_keys.iter().all(|&code| key_down(code)))
+            || (!self.held.keys_empty() && self.held.key_codes().all(|&code| key_down(code)))
             || (0..128).any(&mut key_down)
-            // Mouse triggers share pressed_keys; a stale keyboard entry must
+            // Mouse triggers share tracked keys; a stale keyboard entry must
             // not cause recovery while a tracked mouse button is still down.
-            || self.pressed_keys.iter().any(|&code| {
+            || self.held.key_codes().any(|&code| {
                 crate::app_settings::HotkeyKey::mouse_button(code).is_some() && key_down(code)
             })
             || flags() & modifiers_mask != 0
@@ -522,21 +623,19 @@ impl DictationHotkey {
             return;
         }
         let locked = matches!(self.state, State::Locked);
+        let key_codes: Vec<u16> = self.held.key_codes().copied().collect();
         // A system shortcut such as Command-Tab swallows its key's release.
         tracing::warn!(
-            key_count = self.pressed_keys.len(),
-            key_codes = ?self.pressed_keys,
+            key_count = self.held.key_count(),
+            key_codes = ?key_codes,
             locked,
             "resynchronized stale input tracking after neutral keyboard"
         );
-        self.pressed_keys.clear();
-        self.key_down_at.clear();
+        self.held.recover(sampled_flags);
         // The scan is not atomic, so it rebuilds the held modifiers but is no
         // neutral evidence for keys whose delayed edges may still arrive.
         self.modifier_history.flags = sampled_flags;
         self.modifier_history.flags_at = sampled_through;
-        self.side_down_at
-            .retain(|&mask, _| sampled_flags & mask != 0);
         // Repair bookkeeping only: a lock keeps capturing until a fresh press.
         if !locked {
             self.state = State::IDLE;
@@ -552,9 +651,9 @@ impl DictationHotkey {
         self.suspend();
         self.ignore_before = Some(now);
         if key_down && let Some(code) = self.binding.key_code {
-            self.pressed_keys.insert(code);
+            self.held.press(code, now);
         }
-        if flags & HOTKEY_MODIFIERS_MASK != 0 || !self.pressed_keys.is_empty() {
+        if flags & HOTKEY_MODIFIERS_MASK != 0 || !self.held.keys_empty() {
             self.state = State::Dirty;
         }
     }
@@ -572,15 +671,9 @@ impl DictationHotkey {
                 .recovery_ignore_through
                 .is_some_and(|fence| at <= fence);
         if let InputEvent::Flags(flags) = event {
-            for mask in MODIFIER_SIDE_MASKS {
-                if flags & mask == 0 {
-                    self.side_down_at.remove(&mask);
-                } else {
-                    self.side_down_at.entry(mask).or_insert(at);
-                }
-            }
+            self.held.update_sides(flags, at);
         } else if matches!(event, InputEvent::TapDisabled) {
-            self.side_down_at.clear();
+            self.held.clear_sides();
         }
         if let InputEvent::Flags(flags) = event
             && at >= self.function_modifier.0
@@ -624,12 +717,9 @@ impl DictationHotkey {
         Some(match event {
             InputEvent::Key { code, down, .. } => {
                 if down {
-                    let down_at = self.key_down_at.entry(code).or_insert(at);
-                    *down_at = (*down_at).max(at);
-                    self.pressed_keys.insert(code)
+                    self.held.press(code, at)
                 } else {
-                    self.pressed_keys.remove(&code);
-                    self.key_down_at.remove(&code);
+                    self.held.release(code);
                     false
                 }
             }
@@ -665,7 +755,25 @@ impl DictationHotkey {
         let was_locked = matches!(self.state, State::Locked);
         let action = self.process_event(event, now);
         self.track_chord_break(event, now, action, was_locked);
+        match action {
+            Some(HotkeyAction::Start) => self.cancel_confirm.started(std::time::Instant::now()),
+            Some(
+                HotkeyAction::Finish
+                | HotkeyAction::Cancel
+                | HotkeyAction::CancelShortcut
+                | HotkeyAction::Discard(_),
+            ) => self.cancel_confirm.ended(),
+            Some(HotkeyAction::PasteLast | HotkeyAction::ModelSwitch) | None => {}
+        }
         action
+    }
+
+    /// Labs › Confirm long cancels: whether this cancel press discards the
+    /// capture now. A long capture's first press asks instead, shows the
+    /// notice, and leaves the capture recording.
+    fn cancel_confirmed(&mut self) -> bool {
+        self.cancel_confirm
+            .press_with_notice((self.confirm_long_cancels)(), std::time::Instant::now())
     }
 
     /// A bare modifier passes through to other apps, so a hold reads to them
@@ -773,7 +881,7 @@ impl DictationHotkey {
             let neutral = matches!(
                 event,
                 InputEvent::Flags(flags) | InputEvent::Key { flags, .. }
-                    if flags & HOTKEY_MODIFIERS_MASK == 0 && self.pressed_keys.is_empty()
+                    if flags & HOTKEY_MODIFIERS_MASK == 0 && self.held.keys_empty()
             );
             if !neutral && matches!(self.state, State::Idle { .. } | State::Dirty) {
                 self.state = State::Dirty;
@@ -784,6 +892,19 @@ impl DictationHotkey {
         if fresh_key_down
             && let Some(action) = paste_action(event, crate::app_settings::runtime_hotkeys())
         {
+            self.state = State::Dirty;
+            return Some(action);
+        }
+        if fresh_key_down
+            && let Some(action) = model_switch_action(event, crate::app_settings::runtime_hotkeys())
+        {
+            // While a capture records, the tap already keeps this key from the
+            // app; the press switches nothing and leaves the capture state
+            // alone, so a Hold release still finishes and a Locked capture
+            // still finishes on the next press.
+            if self.is_recording() {
+                return None;
+            }
             self.state = State::Dirty;
             return Some(action);
         }
@@ -802,6 +923,9 @@ impl DictationHotkey {
                 .cancel
                 .is_some_and(|cancel| cancel.matches_key_press(code, flags))
         {
+            if !self.cancel_confirmed() {
+                return None;
+            }
             self.state = State::Dirty;
             return Some(HotkeyAction::CancelShortcut);
         }
@@ -809,10 +933,24 @@ impl DictationHotkey {
             if let State::Recording { started_at, .. } = self.state
                 && self.escape_cancels_hold(now)
             {
+                if !self.cancel_confirmed() {
+                    return None;
+                }
                 tracing::info!(
                     shortcut = "dictation",
                     after_press_ms = signed_ms(now, started_at),
                     "dictation cancelled by Escape while held"
+                );
+                self.state = State::Dirty;
+                return Some(HotkeyAction::CancelShortcut);
+            }
+            if self.escape_cancels_locked() {
+                if !self.cancel_confirmed() {
+                    return None;
+                }
+                tracing::info!(
+                    shortcut = "dictation",
+                    "hands-free dictation cancelled by Escape"
                 );
                 self.state = State::Dirty;
                 return Some(HotkeyAction::CancelShortcut);
@@ -864,7 +1002,7 @@ impl DictationHotkey {
                 && self
                     .binding
                     .key_code
-                    .is_none_or(|code| self.pressed_keys.contains(&code))
+                    .is_none_or(|code| self.held.contains_key(code))
         });
         let trigger_released = flags.is_some() && !trigger_down;
         let unrelated_key_down = matches!(
@@ -1013,8 +1151,11 @@ impl DictationHotkey {
                             && !is_return_key(event)
                             && self.binding.key_code.is_none()
                             && !self.toggle
-                            && !((self.hold_through_keys)()
-                                && now.duration_since(started_at) >= HOLD_THROUGH_KEYS_AFTER))) =>
+                            && !crate::dictation::holds_through_joining_keys(
+                                (self.hold_through_keys)(),
+                                self.toggle,
+                                now.duration_since(started_at),
+                            ))) =>
             {
                 self.state = State::Dirty;
                 let cause = match event {
@@ -1059,7 +1200,7 @@ impl DictationHotkey {
             }
             State::Dirty
                 if flags.is_some_and(|flags| flags & HOTKEY_MODIFIERS_MASK == 0)
-                    && self.pressed_keys.is_empty() =>
+                    && self.held.keys_empty() =>
             {
                 self.state = State::IDLE;
                 None
@@ -1103,7 +1244,7 @@ impl DictationHotkey {
     fn resync_stale_press(&mut self, now: CaptureInstant) -> Option<&'static str> {
         let binding_key = self.binding.key_code;
         let stale = |code: &u16| Some(*code) != binding_key;
-        let has_stale = self.pressed_keys.iter().any(stale);
+        let has_stale = self.held.key_codes().any(stale);
         match self.state {
             State::Dirty if has_stale => {}
             State::Dirty => return Some("waiting for a neutral keyboard"),
@@ -1116,12 +1257,12 @@ impl DictationHotkey {
         let neutral_since_down = |code: &u16| {
             history
                 .neutral_at
-                .zip(self.key_down_at.get(code).copied())
+                .zip(self.held.key_down_at(*code))
                 .is_some_and(|(neutral, down)| neutral > down)
         };
         if !self
-            .pressed_keys
-            .iter()
+            .held
+            .key_codes()
             .filter(|code| stale(code))
             .all(neutral_since_down)
         {
@@ -1131,17 +1272,17 @@ impl DictationHotkey {
         if history.since_neutral & !binding_mask != 0 {
             return Some("another modifier went down since the keyboard was neutral");
         }
-        // Key repeats refresh `key_down_at`, so a silent keyboard key is latched.
+        // Key repeats refresh each key's timestamp, so a silent keyboard key is latched.
         let silent = |code: &u16| {
             crate::app_settings::HotkeyKey::mouse_button(*code).is_none()
-                && self.key_down_at.get(code).is_some_and(|down| {
-                    now.checked_duration_since(*down)
+                && self.held.key_down_at(*code).is_some_and(|down| {
+                    now.checked_duration_since(down)
                         .is_some_and(|age| age >= TRACKED_KEY_REPEAT_TIMEOUT)
                 })
         };
         let held: Vec<u16> = self
-            .pressed_keys
-            .iter()
+            .held
+            .key_codes()
             .filter(|code| stale(code))
             .filter(|&&code| (self.physical.key_down)(code))
             .copied()
@@ -1159,14 +1300,13 @@ impl DictationHotkey {
         if (self.physical.flags)() & others != 0 {
             return Some("another modifier is physically down");
         }
+        let key_codes: Vec<u16> = self.held.key_codes().copied().collect();
         tracing::info!(
             shortcut = "dictation",
-            key_codes = ?self.pressed_keys,
+            key_codes = ?key_codes,
             "resynchronized stale input tracking on a shortcut press"
         );
-        self.pressed_keys.retain(|code| !stale(code));
-        let pressed = &self.pressed_keys;
-        self.key_down_at.retain(|code, _| pressed.contains(code));
+        self.held.retain_keys(|code| !stale(code));
         // Command-Tab while hands-free: the press finishes the lock.
         if !matches!(self.state, State::Locked) {
             self.state = State::IDLE;
@@ -1177,17 +1317,18 @@ impl DictationHotkey {
         // the press itself still count, so a same-tick chord discards it.
         self.recovery_ignore_through = now.checked_sub(Duration::from_nanos(1));
         self.recovery_updated_keys = binding_key
-            .filter(|code| self.pressed_keys.contains(code))
+            .filter(|code| self.held.contains_key(*code))
             .into_iter()
             .collect();
         None
     }
 
     fn log_ignored_press(&self, reason: &'static str) {
+        let key_codes: Vec<u16> = self.held.key_codes().copied().collect();
         tracing::info!(
             shortcut = "dictation",
             reason,
-            key_codes = ?self.pressed_keys,
+            key_codes = ?key_codes,
             "shortcut press ignored"
         );
     }
@@ -1205,7 +1346,7 @@ impl DictationHotkey {
                         } if code == key_code && self.binding.exact_modifiers(flags)
                     )
             }
-            None => self.pressed_keys.is_empty() && self.modifiers_went_down(event, prior_flags),
+            None => self.held.keys_empty() && self.modifiers_went_down(event, prior_flags),
         }
     }
 
@@ -1215,8 +1356,8 @@ impl DictationHotkey {
     /// presses nothing. Other chords press as soon as their keys are down.
     fn both_sides_went_down_together(&self) -> bool {
         self.binding.both_sides_masks().all(|(left, right)| {
-            match (self.side_down_at.get(&left), self.side_down_at.get(&right)) {
-                (Some(&left), Some(&right)) => {
+            match (self.held.side_down_at(left), self.held.side_down_at(right)) {
+                (Some(left), Some(right)) => {
                     left.max(right).duration_since(left.min(right)) <= BOTH_SIDES_WINDOW
                 }
                 _ => false,

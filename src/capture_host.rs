@@ -1,6 +1,6 @@
-//! The `capture` experiment (macOS, Linux, and Windows): Scrawl's capture
-//! engine, the `scrawl-capture` crate, hosted inside Hex. Step 3 of
-//! `docs/plans/capture-in-hex.md`. Everything here is shared; what differs
+//! Annotate (macOS, Linux, and Windows): Scrawl's capture engine, the
+//! `scrawl-capture` crate, hosted inside Hex (`docs/features/capture.md`,
+//! `docs/hex-annotation.md`). Everything here is shared; what differs
 //! by OS is the engine's own platform adapter (ScreenCaptureKit; the portal,
 //! PipeWire and VA-API; or Windows.Graphics.Capture), where the audio
 //! timeline comes from (`DictationAudio` on macOS, the Linux and Windows
@@ -38,7 +38,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -47,10 +47,7 @@ use crate::audio::CaptureInstant;
 pub use crate::audio::recording_environment::RecordingEnvironmentController as Environment;
 #[cfg(target_os = "macos")]
 use crate::audio::recording_environment::RecordingEnvironmentSession as Quiet;
-use crate::control::{
-    ControlReply, ScrawlCaptureAction, ScrawlCaptureOutcome, ScrawlCaptureReport,
-    ScrawlCaptureState,
-};
+use crate::control::{ControlReply, ScrawlCaptureAction, ScrawlCaptureReport, ScrawlCaptureState};
 #[cfg(target_os = "macos")]
 use crate::dictation::audio::DictationAudio;
 use crate::transcription::engine::TranscriptionEngine;
@@ -66,21 +63,52 @@ use scrawl_capture::hosted_input::{HostInput, HostedInput, Modifiers};
 use scrawl_capture::model::WordTiming;
 use scrawl_capture::transcribe::Transcriber;
 
+pub(crate) mod annotate_read;
+mod drawing;
 // `hex annotate`'s folder commands; Windows has no control transport for
 // them yet.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 mod library;
+mod microphone;
+mod outcomes;
+mod own_windows;
+pub(crate) use microphone::recording_level;
 #[cfg(target_os = "macos")]
 pub(crate) mod paste_source;
 mod permissions;
 mod replay;
-mod routing;
+pub(crate) mod routing;
 #[cfg(target_os = "macos")]
 mod screen_access;
 mod sink;
 mod timeline;
 mod wav_file;
 mod words;
+
+#[cfg(all(test, target_os = "macos"))]
+use drawing::DRAW_HOLD;
+#[cfg(test)]
+use drawing::end_stroke;
+#[cfg(all(test, target_os = "linux"))]
+use drawing::ink_points;
+#[cfg(target_os = "linux")]
+pub use drawing::{InkSpace, draw, pen_button};
+pub use drawing::{KeyUp, annotate_key_down, annotate_key_up, drawing, exit_drawing, toggle_pen};
+#[cfg(test)]
+use outcomes::Feed;
+#[cfg(target_os = "macos")]
+pub use outcomes::snapshot;
+use outcomes::{CaptureEnd, LIVE_OUTCOMES, Outcomes, SharedOutcomes, lock};
+pub use outcomes::{CaptureSnapshot, SettledCapture, watch};
+#[cfg(test)]
+pub use outcomes::{FinishingCapture, RecordingCapture};
+
+#[cfg(target_os = "macos")]
+pub use own_windows::DIM_WINDOWS;
+#[cfg(target_os = "macos")]
+use own_windows::OwnWindowIds;
+use own_windows::{OWN_WINDOWS, own_windows_of};
+pub use own_windows::{OwnWindow, exclude_window, own_windows_recorded, record_own_windows};
 
 pub use library::{
     explain as explain_capture, list as list_captures, send as send_capture, show as show_capture,
@@ -93,10 +121,12 @@ pub use permissions::{
     restart as restart_for_permission, state_of as permission_state,
 };
 pub use replay::available as replay_available;
-pub use routing::CaptureRoute;
-pub use routing::{RouteAnswer, RouteDelivery, RouteDest, SEND_HOLD};
 #[cfg(target_os = "macos")]
-pub use routing::{recent_sessions, send_image};
+pub use routing::send_image;
+pub use routing::{
+    AutoSendBy, CaptureRoute, RouteAnswer, RouteDelivery, RouteDest, RuleMatch, SEND_HOLD,
+    jev_available, recent_sessions,
+};
 #[cfg(target_os = "macos")]
 pub use screen_access::*;
 #[cfg(target_os = "macos")]
@@ -107,8 +137,9 @@ pub use sink::{CaptureAudio, CaptureSinkClosed};
 use timeline::Timeline;
 use words::ChosenTranscriber;
 
-/// "While dictating" for a capture on Linux: its own audio suppressor, made
-/// when the capture starts and restoring what it changed when dropped.
+/// "While dictating" for a capture on Linux: a session on the shared audio
+/// suppressor, composing with dictation and restoring when the last session
+/// ends.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Default)]
 pub struct Environment;
@@ -125,8 +156,8 @@ impl Environment {
     }
 }
 
-/// "While dictating" for a capture on Windows: its own suppressor, made when
-/// the capture starts and restoring what it changed when dropped.
+/// "While dictating" for a capture on Windows: a session on the shared audio
+/// suppressor, composing with dictation without preventing idle sleep.
 #[cfg(target_os = "windows")]
 #[derive(Clone, Default)]
 pub struct Environment;
@@ -137,7 +168,7 @@ type Quiet = crate::windows::audio_control::AudioSuppressor;
 #[cfg(target_os = "windows")]
 impl Environment {
     fn begin_capture(&self, behavior: crate::app_settings::RecordingAudioBehavior) -> Quiet {
-        let quiet = Quiet::start(behavior);
+        let quiet = Quiet::new(behavior);
         quiet.suppress();
         quiet
     }
@@ -151,7 +182,6 @@ const SAMPLE_RATE: u32 = 16_000;
 /// A capture keeps at most this much audio; the rest is recorded as a gap.
 /// It bounds disk use only: the audio streams to `audio.wav.partial`, never memory.
 const MAX_CAPTURE: Duration = Duration::from_secs(8 * 60 * 60);
-const GAP_TOLERANCE: Duration = Duration::from_millis(50);
 /// How long shutdown waits for capture threads, inside the quit deadline.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 /// Captures being written at once: the one finishing plus those queued
@@ -276,33 +306,28 @@ pub enum TargetKind {
 pub enum CaptureCommand {
     /// Starts a capture on the picker's pick; nothing while one records.
     Start(CaptureTarget),
-    /// Labs › Screenshots' recording: a capture of `target` that, once
-    /// written, goes to the screenshot card ([`on_clip_written`]) rather
-    /// than the clipboard and the router.
+    /// Labs › Screenshots' recording: goes to [`on_clip_written`] instead of clipboard/router.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Clip(CaptureTarget),
-    /// Looks for a cabled iPhone off the listener's thread;
-    /// [`CaptureSnapshot::phone`] follows. Each start also looks.
+    /// Looks for a cabled iPhone off the listener's thread ([`CaptureSnapshot::phone`]).
     FindPhone,
-    /// Drops the recording capture: its bundle is removed and it never
-    /// settles, so the capsule can turn into the picker in its place.
+    /// Drops the recording capture and removes its bundle without settling.
     Discard,
-    /// Scrawl's `switch_recording`: drops the recording capture as
-    /// [`Self::Discard`] does and starts `target` in the same step, so no
-    /// snapshot shows nothing recording in between. With nothing recording,
-    /// only starts.
+    /// Drops the recording capture and starts `target` atomically.
     Switch(CaptureTarget),
-    /// Sends the newest written capture (`snapshot().last`) to `to` now: a
-    /// session ID, or a name its route lists, suggestions first. A send
-    /// already elsewhere is taken back first. `always` also saves a rule
-    /// sending its site or app there from now on.
+    /// Sends `snapshot().last` to `to` (taking back any prior send); `always` saves a rule.
     Send { to: String, always: bool },
+    /// Saves a routing rule chosen from the post-send `Always…` configurator.
+    SaveRule(scrawl_capture::RuleKind, String, String),
     /// Takes back the newest capture's send: one OpenCode took is
     /// withdrawn unless the session already acted on it.
     Undo,
     /// The pointer is on the capsule (`true`) or left it: a rule's send
     /// still waiting out its Undo window pauses while it is there.
     Hold(bool),
+    /// Copies the capsule's written capture to the clipboard again after a
+    /// failed initial copy.
+    Copy(PathBuf),
     /// Pastes the capsule's written capture, never a later completion.
     Paste(PathBuf),
     /// Opens the newest written capture's contact sheet: Hex has no review
@@ -338,8 +363,9 @@ trait Sealed: Send {
     /// Removes the bundle.
     fn cancel(self: Box<Self>);
     /// Blocking: transcribes `audio`, picks keyframes, and writes the
-    /// bundle.
-    fn finish(self: Box<Self>, audio: RecordedAudio) -> anyhow::Result<Written>;
+    /// bundle. `None` (a recording with no microphone) keeps no audio and
+    /// transcribes nothing.
+    fn finish(self: Box<Self>, audio: Option<RecordedAudio>) -> anyhow::Result<Written>;
     /// The apps in front when it stopped, for routing; `None` when it isn't
     /// routed.
     fn route_context(&self) -> Option<scrawl_capture::capture::RouteContext> {
@@ -392,8 +418,8 @@ impl Sealed for scrawl_capture::capture::SealedCapture {
         scrawl_capture::capture::SealedCapture::cancel(*self);
     }
 
-    fn finish(self: Box<Self>, audio: RecordedAudio) -> anyhow::Result<Written> {
-        let finished = scrawl_capture::capture::SealedCapture::finish(*self, Some(audio))?;
+    fn finish(self: Box<Self>, audio: Option<RecordedAudio>) -> anyhow::Result<Written> {
+        let finished = scrawl_capture::capture::SealedCapture::finish(*self, audio)?;
         tracing::info!(
             bundle = %finished.dir.display(),
             duration_ms = finished.duration_ms,
@@ -425,11 +451,44 @@ fn scrawl_engine(
         .with_transcriber(transcriber)
 }
 
+/// How a capture's movie is made: a Screenshots recording is for people, so
+/// it's HEVC at the size, frame rate, and quality Labs › Screenshots asks
+/// for; an Annotate capture's stays sized for agents.
+/// Whether a Screenshots recording holds "While dictating": not while it
+/// records the computer's sound, which that would silence, nor with no
+/// microphone, when there's no voice to clear the way for.
+fn wants_quiet(system_audio: bool, microphone: &microphone::Choice) -> bool {
+    !system_audio && !matches!(microphone, microphone::Choice::Silent)
+}
+
+fn movie_for(clip: bool, screenshots: &crate::app_settings::ScreenshotSettings) -> MovieQuality {
+    if clip {
+        MovieQuality::Full(screenshots.movie_size())
+    } else {
+        MovieQuality::Compact
+    }
+}
+
 /// What the capture asks for: `target`, on the clock the dictation timeline
-/// shares, with Hex's audio and Hex's folder. A Screenshots recording is for
-/// people, so its movie keeps every pixel; an Annotate capture's stays sized
-/// for agents.
-fn start_request(t0: CaptureInstant, bundle: PathBuf, target: Target, clip: bool) -> Start {
+/// shares, with Hex's audio and Hex's folder, its movie made as `movie` says.
+fn start_request(
+    t0: CaptureInstant,
+    bundle: PathBuf,
+    target: Target,
+    movie: MovieQuality,
+) -> Start {
+    // Only a screen goes through the portal's remembered output; a window is
+    // picked each time and an iPhone never asks.
+    let screen = match &target {
+        Target::ActiveDisplay => true,
+        Target::Screen(info) => info.mode != scrawl_capture::model::CaptureMode::Window,
+        Target::Phone { .. } => false,
+    };
+    let portal_token = if screen {
+        portal_token()
+    } else {
+        scrawl_capture::capture::PortalToken::None
+    };
     Start {
         t0_boot_ns: t0.as_nanos(),
         target,
@@ -437,12 +496,50 @@ fn start_request(t0: CaptureInstant, bundle: PathBuf, target: Target, clip: bool
         audio: AudioIn::External,
         window_log: true,
         note: None,
-        movie: if clip {
-            MovieQuality::Full
-        } else {
-            MovieQuality::Compact
-        },
+        movie,
+        portal_token,
     }
+}
+
+/// Where a screen capture's ScreenCast restore token goes, read at each
+/// start: the one file, or, with Labs › Record the screen under the pointer
+/// on Wayland, the file for the output under the pointer.
+#[cfg(target_os = "linux")]
+fn portal_token() -> scrawl_capture::capture::PortalToken {
+    use scrawl_capture::capture::{OutputBounds, PortalToken};
+    let Ok(support) = crate::app_paths::support_dir() else {
+        return PortalToken::None;
+    };
+    let single = support.join("screencast-token");
+    // X11 reads the screen itself and a window goes through the portal's
+    // picker each time: only a Wayland screen has a remembered output.
+    if !crate::labs::annotate_pointer_screen() || std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return PortalToken::File(single);
+    }
+    let Some(pointer) = crate::linux::pointer_output::under_pointer() else {
+        tracing::info!(
+            "the pointer's output is unknown; the screen-cast portal keeps its one remembered screen"
+        );
+        return PortalToken::File(single);
+    };
+    let outputs = crate::linux::output::list()
+        .into_iter()
+        .map(|output| OutputBounds {
+            name: output.name,
+            position: output.position,
+            size: output.size,
+        })
+        .collect();
+    PortalToken::PerOutput {
+        dir: support,
+        pointer,
+        outputs,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn portal_token() -> scrawl_capture::capture::PortalToken {
+    scrawl_capture::capture::PortalToken::None
 }
 
 /// Forwards events to a bounded channel (the `capture-events` thread logs
@@ -475,33 +572,6 @@ impl Host for HexHost {
                 .unwrap_or_else(|error| error.into_inner()),
         )
     }
-}
-
-/// What a capture leaves out of its recording (every window Hex named) and
-/// looks through for clicks: the ink overlay, and the capsule's panel, which
-/// lets clicks through everywhere but its pill. Clicks on the pill never
-/// reach the engine ([`CapsulePill`]).
-fn own_windows_of(own: &OwnWindowIds) -> OwnWindows {
-    OwnWindows {
-        excluded: own.excluded(),
-        passthrough: [own.ink, own.capsule].into_iter().flatten().collect(),
-        recorded: Arc::clone(&OWN_WINDOWS_RECORDED),
-    }
-}
-
-/// `capture.show_overlays_in_recordings`: while set, a capture records every
-/// window of Hex's, its overlays included. A recording capture follows a
-/// change at once.
-static OWN_WINDOWS_RECORDED: LazyLock<Arc<AtomicBool>> = LazyLock::new(Arc::default);
-
-/// Lets captures record Hex's own windows, or leaves them out again.
-pub fn record_own_windows(recorded: bool) {
-    OWN_WINDOWS_RECORDED.store(recorded, Ordering::Release);
-}
-
-/// Whether screen recordings may show Hex's overlays, as last saved.
-pub fn own_windows_recorded() -> bool {
-    OWN_WINDOWS_RECORDED.load(Ordering::Acquire)
 }
 
 /// The capsule's pill `[x, y, w, h]` in its panel's points while it shows.
@@ -588,74 +658,6 @@ fn on_pill(origin: [f64; 2], pill: [f32; 4], x: f64, y: f64) -> bool {
     x >= left && x <= left + pw && y >= top && y <= top + ph
 }
 
-/// Hex's windows a capture leaves out of its recording, one per role. A
-/// capture reads them when it starts.
-static OWN_WINDOWS: Mutex<OwnWindowIds> = Mutex::new(OwnWindowIds {
-    capsule: None,
-    ink: None,
-    picker: None,
-});
-
-/// The window holding each [`OwnWindow`] role.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct OwnWindowIds {
-    capsule: Option<u32>,
-    ink: Option<u32>,
-    picker: Option<u32>,
-}
-
-impl OwnWindowIds {
-    /// Every window held, which a recording leaves out.
-    fn excluded(self) -> Vec<u32> {
-        let Self {
-            capsule,
-            ink,
-            picker,
-        } = self;
-        [capsule, ink, picker].into_iter().flatten().collect()
-    }
-}
-
-/// Which of Hex's windows a capture leaves out.
-#[derive(Clone, Copy, Debug)]
-pub enum OwnWindow {
-    /// A panel far larger than the pill: click-through but for the pill
-    /// ([`set_capsule_pill`]).
-    Capsule,
-    /// Click-through, so a click on it never counts as a click on Hex.
-    Ink,
-    /// The on-screen picker, hidden before the capture it starts records.
-    Picker,
-}
-
-/// Leaves `window` out of every later capture's recording, replacing the
-/// window that last held `role`. Rune makes the overlays' windows for each
-/// show (#1315), so one made while a capture records joins it too.
-pub fn exclude_window(role: OwnWindow, window: u32) {
-    let mut own = OWN_WINDOWS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    *match role {
-        OwnWindow::Capsule => &mut own.capsule,
-        OwnWindow::Ink => &mut own.ink,
-        OwnWindow::Picker => &mut own.picker,
-    } = Some(window);
-    let joined = own_windows_of(&own);
-    drop(own);
-    let Some(source) = ink_source() else { return };
-    for (ids, list) in [
-        (&*source.telemetry.excluded_window_ids, joined.excluded),
-        (&source.telemetry.passthrough_window_ids, joined.passthrough),
-    ] {
-        let mut ids = ids.lock().unwrap_or_else(|error| error.into_inner());
-        for id in list {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-    }
-}
-
 /// The engine's settings, from Hex rather than `~/.config/scrawl`. The
 /// captures folder, retention, and transcriber are Hex's `capture.*`
 /// settings, applied by [`CaptureHost`]; the rest are Scrawl's defaults,
@@ -671,6 +673,12 @@ impl ConfigSource for HexConfig {
 
 fn hex_engine_config() -> EngineConfig {
     let mut config = EngineConfig::default();
+    config.captures_dir = Some(
+        crate::app_settings::capture_settings()
+            .captures_dir()
+            .to_string_lossy()
+            .into_owned(),
+    );
     config.autocrop = Some(serde_json::Value::Bool(true));
     config
         .experiments
@@ -702,11 +710,6 @@ fn shared_engine(
     let mut engine = ENGINE.lock().unwrap_or_else(|error| error.into_inner());
     if let Some(engine) = &*engine {
         return Ok(engine.clone());
-    }
-    // The portal remembers the screen Hex was given; the token is Hex's.
-    #[cfg(target_os = "linux")]
-    if let Ok(support) = crate::app_paths::support_dir() {
-        scrawl_capture::linux::set_token_path(support.join("screencast-token"));
     }
     let (events, received) = mpsc::sync_channel(EVENT_CAPACITY);
     thread::Builder::new()
@@ -754,7 +757,7 @@ const WORD_LAGS: &[(TranscriptionModelId, &str, WordLag)] = &[(
 )];
 
 fn word_lag(model: TranscriptionModelId) -> Option<&'static WordLag> {
-    let ModelRuntime::Gguf(artifact) = crate::transcription::models::definition(model).runtime
+    let ModelRuntime::Gguf(artifact) = &crate::transcription::models::definition(model).runtime
     else {
         return None;
     };
@@ -798,8 +801,8 @@ fn corrected_words(words: Vec<TimedWord>, lag: Option<&WordLag>) -> Vec<WordTimi
         .collect()
 }
 
-/// Creates `dir` and missing parents owner-only, and makes `dir` itself
-/// owner-only if it already existed.
+/// Creates missing directories owner-only. Never chmod an existing custom
+/// location (it may be a shared folder, or the user's home directory).
 /// On Windows the folder inherits the profile's ACL, which is the user's.
 fn private_dirs(dir: &Path) -> Result<()> {
     let mut builder = DirBuilder::new();
@@ -809,36 +812,31 @@ fn private_dirs(dir: &Path) -> Result<()> {
     builder
         .create(dir)
         .wrap_err_with(|| format!("could not create {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-            .wrap_err_with(|| format!("could not restrict {}", dir.display()))?;
-    }
     Ok(())
 }
 
-/// A fresh owner-only `<captures>/<unix ms>.scrawl` folder; never adopts one
+/// A fresh owner-only annotation package; never adopts one
 /// that exists. Stamps never repeat within the process: a discarded capture's
 /// folder is removed on its collector's thread, so a switch in the same
 /// millisecond could otherwise reuse its path while it is still unfinished.
 fn new_bundle_dir(captures_dir: &Path) -> Result<PathBuf> {
-    static LAST_STAMP: Mutex<u128> = Mutex::new(0);
+    color_eyre::eyre::ensure!(
+        captures_dir.is_absolute(),
+        "No absolute annotations folder is available"
+    );
     private_dirs(captures_dir)?;
-    let now = std::time::SystemTime::now()
+    let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let stamp = {
-        let mut last = LAST_STAMP.lock().unwrap_or_else(|error| error.into_inner());
-        *last = now.max(*last + 1);
-        *last
-    };
-    for attempt in 0..100 {
-        let name = match attempt {
-            0 => format!("{stamp}.scrawl"),
-            n => format!("{stamp}-{n}.scrawl"),
-        };
+    for _ in 0..100 {
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).map_err(|e| eyre!("Could not create annotation id: {e}"))?;
+        let name = format!(
+            "{stamp}-{:032x}.{}",
+            u128::from_be_bytes(random),
+            scrawl_capture::bundle::EXTENSION
+        );
         let dir = captures_dir.join(name);
         #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = DirBuilder::new();
@@ -907,6 +905,10 @@ fn remove_bundle(dir: &Path) {
 pub trait AudioTimeline {
     fn open_sink(&self, sink: SyncSender<CaptureAudio>, since: CaptureInstant) -> Result<()>;
     fn close_sink(&self, through: CaptureInstant) -> Result<Option<CaptureSinkClosed>>;
+    /// The microphone the timeline records from, when it has one open.
+    fn device_name(&self) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -917,6 +919,14 @@ impl AudioTimeline for DictationAudio {
 
     fn close_sink(&self, through: CaptureInstant) -> Result<Option<CaptureSinkClosed>> {
         self.close_capture_sink(through)
+    }
+
+    /// Only while its stream is open: a closed one's last name may not be
+    /// the input it opens next.
+    fn device_name(&self) -> Option<String> {
+        self.is_open()
+            .then(|| DictationAudio::device_name(self))
+            .filter(|name| !name.is_empty())
     }
 }
 
@@ -950,454 +960,18 @@ struct Active {
     quiet: Option<Quiet>,
     /// A Screenshots recording ([`CaptureCommand::Clip`]).
     clip: bool,
+    /// Where its microphone audio comes from.
+    microphone: microphone::Microphone,
 }
 
 /// A stopped capture and its audio, waiting for the finisher.
 struct FinishJob {
     bundle: PathBuf,
     capture: Box<dyn Sealed>,
-    audio: RecordedAudio,
+    audio: Option<RecordedAudio>,
     /// What the router saw when it stopped, handed over once the job was
     /// queued; the sender is dropped without one when captures aren't sent.
     look: Receiver<routing::Look>,
-}
-
-// ---------------------------------------------------------------------------
-// What views see: one snapshot of every capture, published on each change.
-
-/// Every capture Hex knows about, as one value. A view (the capture
-/// capsule, the menu bar, `hex capture`) reads it whole instead of reaching
-/// into the host, and [`watch`] says when it changed.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CaptureSnapshot {
-    /// Bumped on every change, across hosts, for the life of the process.
-    pub generation: u64,
-    pub recording: Option<RecordingCapture>,
-    /// Stopped captures still being written or cancelled, oldest first.
-    pub finishing: Vec<FinishingCapture>,
-    /// The most recent capture that finished, failed, or was cancelled.
-    pub last: Option<SettledCapture>,
-    /// The cabled iPhone's name, when one was found at the last look
-    /// ([`CaptureCommand::FindPhone`]): the capsule's iPhone chip.
-    pub phone: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecordingCapture {
-    pub bundle: PathBuf,
-    /// When it started, on the clock [`CaptureInstant::now`] reads.
-    pub since: CaptureInstant,
-    /// The engine started recording the screen; until then it is starting.
-    pub screen: bool,
-    pub target: TargetKind,
-    /// The capture recorded a click, scroll, or ink stroke: the person got
-    /// to work, so the capsule's switch chips fold.
-    pub worked: bool,
-    /// A Screenshots recording: once stopped, the screenshot card shows it
-    /// and the capsule folds.
-    pub clip: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FinishingCapture {
-    pub bundle: PathBuf,
-    /// The engine's latest stage: `Stopping` until it reports another.
-    pub stage: Stage,
-    pub cancelling: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SettledCapture {
-    pub bundle: PathBuf,
-    /// `Done`, `Failed`, or `Cancelled`.
-    pub stage: Stage,
-    /// A written capture's words, missing spans of audio, and why it has
-    /// no transcript, if it has none.
-    pub words: Option<usize>,
-    pub gaps: Option<usize>,
-    /// Where a written capture's audio stops, when Hex had to stop keeping it.
-    pub audio_stopped_at_ms: Option<u64>,
-    pub missing_transcript: Option<String>,
-    /// Why a capture failed, when Hex knows.
-    pub error: Option<String>,
-    /// Why a written capture's summary didn't reach the clipboard; `None`
-    /// once it did (or for a capture that isn't copied).
-    pub copy_error: Option<String>,
-    /// Where a written capture goes, while captures are sent to OpenCode
-    /// (`capture.routing`'s `autoSend`).
-    pub route: Option<CaptureRoute>,
-}
-
-impl SettledCapture {
-    fn outcome(&self) -> ScrawlCaptureOutcome {
-        ScrawlCaptureOutcome {
-            bundle: self.bundle.clone(),
-            stage: self.stage.label().into(),
-            words: self.words,
-            gaps: self.gaps,
-            audio_stopped_at_ms: self.audio_stopped_at_ms,
-            missing_transcript: self.missing_transcript.clone(),
-        }
-    }
-}
-
-/// The process's capture snapshot and those watching it.
-struct Feed {
-    snapshot: Mutex<CaptureSnapshot>,
-    watchers: Mutex<Vec<SyncSender<()>>>,
-}
-
-impl Feed {
-    const fn new() -> Self {
-        Self {
-            snapshot: Mutex::new(CaptureSnapshot {
-                generation: 0,
-                recording: None,
-                finishing: Vec::new(),
-                last: None,
-                phone: None,
-            }),
-            watchers: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn publish(&self, mut next: CaptureSnapshot) {
-        {
-            let mut snapshot = self
-                .snapshot
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            next.generation = snapshot.generation;
-            if *snapshot == next {
-                return;
-            }
-            next.generation += 1;
-            *snapshot = next;
-        }
-        // A full wake-up is already pending; a gone watcher stops watching.
-        self.watchers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .retain(|wake| !matches!(wake.try_send(()), Err(TrySendError::Disconnected(()))));
-    }
-
-    fn snapshot(&self) -> CaptureSnapshot {
-        self.snapshot
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-    }
-
-    fn watch(&'static self) -> CaptureWatch {
-        let (wake, woken) = mpsc::sync_channel(1);
-        let _ = wake.try_send(());
-        self.watchers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(wake);
-        CaptureWatch { feed: self, woken }
-    }
-}
-
-static FEED: Feed = Feed::new();
-
-/// The current capture snapshot.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn snapshot() -> CaptureSnapshot {
-    FEED.snapshot()
-}
-
-/// Watches the capture snapshot from any thread. Changes coalesce: a watcher
-/// always gets the latest snapshot, never a stale one, but may skip the ones
-/// between.
-pub fn watch() -> CaptureWatch {
-    FEED.watch()
-}
-
-pub struct CaptureWatch {
-    feed: &'static Feed,
-    woken: Receiver<()>,
-}
-
-impl CaptureWatch {
-    /// The snapshot if it changed since the last call (the first call always
-    /// returns it), without blocking.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the capsule waits instead"))]
-    pub fn changed(&self) -> Option<CaptureSnapshot> {
-        let mut woke = false;
-        while self.woken.try_recv().is_ok() {
-            woke = true;
-        }
-        woke.then(|| self.feed.snapshot())
-    }
-
-    /// Waits up to `timeout` for a change.
-    pub fn wait(&self, timeout: Duration) -> Option<CaptureSnapshot> {
-        self.woken.recv_timeout(timeout).ok()?;
-        while self.woken.try_recv().is_ok() {}
-        Some(self.feed.snapshot())
-    }
-}
-
-/// The host's captures from start to outcome; every change publishes a
-/// snapshot to the feed.
-struct Outcomes {
-    /// Every capture from its start until its outcome is settled: starting,
-    /// recording, waiting to be written, writing, or cancelling. Each is
-    /// settled exactly once, by its collector or by the finisher.
-    unfinished: Vec<Unfinished>,
-    last: Option<SettledCapture>,
-    phone: Option<String>,
-    /// The iPhone mirror ended on its own; the listener's next
-    /// [`CaptureHost::reap`] finishes the capture.
-    phone_ended: bool,
-    feed: &'static Feed,
-    /// A switch is between its discard and its start: views see neither
-    /// half alone ([`CaptureCommand::Switch`]).
-    held: bool,
-}
-
-struct Unfinished {
-    bundle: PathBuf,
-    since: CaptureInstant,
-    /// `None` while it records; the stage once it was stopped or cancelled.
-    stopped: Option<(Stage, bool)>,
-    screen: bool,
-    target: TargetKind,
-    worked: bool,
-    /// Dropped for another target: views never see it again, and it
-    /// settles no outcome.
-    discarded: bool,
-    /// A Screenshots recording ([`CaptureCommand::Clip`]).
-    clip: bool,
-}
-
-impl Default for Outcomes {
-    fn default() -> Self {
-        Self::on(&FEED)
-    }
-}
-
-impl Outcomes {
-    fn on(feed: &'static Feed) -> Self {
-        Self {
-            unfinished: Vec::new(),
-            last: None,
-            phone: None,
-            phone_ended: false,
-            feed,
-            held: false,
-        }
-    }
-
-    fn idle(&self) -> bool {
-        self.unfinished.is_empty()
-    }
-
-    /// Captures still being written or cancelled, which count against
-    /// [`MAX_FINISHING`]; a discarded one is only being removed.
-    fn writing(&self) -> usize {
-        self.unfinished
-            .iter()
-            .filter(|unfinished| !unfinished.discarded)
-            .count()
-    }
-
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    fn started(&mut self, bundle: PathBuf, since: CaptureInstant, target: TargetKind) {
-        self.start(bundle, since, target, false);
-    }
-
-    fn start(&mut self, bundle: PathBuf, since: CaptureInstant, target: TargetKind, clip: bool) {
-        self.unfinished.push(Unfinished {
-            bundle,
-            since,
-            stopped: None,
-            screen: false,
-            target,
-            worked: false,
-            discarded: false,
-            clip,
-        });
-        self.publish();
-    }
-
-    /// Whether `bundle` is a Screenshots recording still unsettled.
-    fn is_clip(&self, bundle: &Path) -> bool {
-        self.unfinished
-            .iter()
-            .any(|unfinished| unfinished.bundle == bundle && unfinished.clip)
-    }
-
-    fn stopped(&mut self, bundle: &Path, end: End) {
-        if let Some(unfinished) = self.find(bundle) {
-            unfinished.stopped = Some((Stage::Stopping, end != End::Finish));
-            unfinished.discarded = end == End::Discard;
-            self.publish();
-        }
-    }
-
-    fn worked(&mut self, bundle: &Path) {
-        if let Some(unfinished) = self.find(bundle)
-            && unfinished.stopped.is_none()
-            && !unfinished.worked
-        {
-            unfinished.worked = true;
-            self.publish();
-        }
-    }
-
-    /// The engine's progress, which arrives late and out of band: it moves a
-    /// capture on but never settles one (its collector or the finisher does).
-    fn progress(&mut self, bundle: &Path, stage: Stage) {
-        let Some(unfinished) = self.find(bundle) else {
-            return;
-        };
-        match (stage, &mut unfinished.stopped) {
-            (Stage::Recording, None) => unfinished.screen = true,
-            (
-                Stage::Stopping | Stage::Transcribing | Stage::Rendering | Stage::Writing,
-                Some((current, false)),
-            ) => *current = stage,
-            _ => return,
-        }
-        self.publish();
-    }
-
-    fn settle(&mut self, bundle: PathBuf, stage: Stage, written: Option<Written>) {
-        self.settle_with(bundle, stage, written, None, None, None);
-    }
-
-    fn fail(&mut self, bundle: PathBuf, error: String) {
-        self.settle_with(bundle, Stage::Failed, None, Some(error), None, None);
-    }
-
-    /// A switch discarded `bundle` and then could not start: its outcome,
-    /// since the discard settles none.
-    fn fail_switch(&mut self, bundle: PathBuf, error: String) {
-        self.last = Some(SettledCapture {
-            bundle,
-            stage: Stage::Failed,
-            words: None,
-            gaps: None,
-            audio_stopped_at_ms: None,
-            missing_transcript: None,
-            error: Some(error),
-            copy_error: None,
-            route: None,
-        });
-        self.publish();
-    }
-
-    fn phone(&mut self, phone: Option<String>) {
-        if self.phone != phone {
-            self.phone = phone;
-            self.publish();
-        }
-    }
-
-    /// A written capture's route changed; only the newest capture's shows.
-    fn routed(&mut self, bundle: &Path, route: CaptureRoute) {
-        if let Some(last) = self.last.as_mut()
-            && last.bundle == bundle
-            && last.route.as_ref() != Some(&route)
-        {
-            last.route = Some(route);
-            self.publish();
-        }
-    }
-
-    fn settle_with(
-        &mut self,
-        bundle: PathBuf,
-        stage: Stage,
-        written: Option<Written>,
-        error: Option<String>,
-        copy_error: Option<String>,
-        route: Option<CaptureRoute>,
-    ) {
-        let discarded = self
-            .find(&bundle)
-            .is_some_and(|unfinished| unfinished.discarded);
-        self.unfinished
-            .retain(|unfinished| unfinished.bundle != bundle);
-        if !discarded {
-            self.last = Some(SettledCapture {
-                bundle,
-                stage,
-                words: written.as_ref().map(|written| written.words),
-                gaps: written.as_ref().map(|written| written.gaps),
-                audio_stopped_at_ms: written
-                    .as_ref()
-                    .and_then(|written| written.audio_stopped_at_ms),
-                missing_transcript: written.and_then(|written| written.missing_transcript),
-                error,
-                copy_error,
-                route,
-            });
-        }
-        self.publish();
-    }
-
-    fn find(&mut self, bundle: &Path) -> Option<&mut Unfinished> {
-        self.unfinished
-            .iter_mut()
-            .find(|unfinished| unfinished.bundle == bundle)
-    }
-
-    fn snapshot(&self) -> CaptureSnapshot {
-        let mut snapshot = CaptureSnapshot {
-            last: self.last.clone(),
-            phone: self.phone.clone(),
-            ..CaptureSnapshot::default()
-        };
-        for unfinished in self
-            .unfinished
-            .iter()
-            .filter(|unfinished| !unfinished.discarded)
-        {
-            match unfinished.stopped {
-                None => {
-                    snapshot.recording = Some(RecordingCapture {
-                        bundle: unfinished.bundle.clone(),
-                        since: unfinished.since,
-                        screen: unfinished.screen,
-                        target: unfinished.target,
-                        worked: unfinished.worked,
-                        clip: unfinished.clip,
-                    });
-                }
-                Some((stage, cancelling)) => snapshot.finishing.push(FinishingCapture {
-                    bundle: unfinished.bundle.clone(),
-                    stage,
-                    cancelling,
-                }),
-            }
-        }
-        snapshot
-    }
-
-    fn publish(&self) {
-        if !self.held {
-            self.feed.publish(self.snapshot());
-        }
-    }
-
-    /// Ends a hold, publishing what changed during it.
-    fn release(&mut self) {
-        self.held = false;
-        self.publish();
-    }
-}
-
-/// The host that last started, for engine progress, which arrives on the
-/// process-wide `capture-events` thread.
-static LIVE_OUTCOMES: Mutex<Weak<Mutex<Outcomes>>> = Mutex::new(Weak::new());
-
-type SharedOutcomes = Arc<Mutex<Outcomes>>;
-
-fn lock(outcomes: &Mutex<Outcomes>) -> std::sync::MutexGuard<'_, Outcomes> {
-    outcomes.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 /// The `hex capture` controller, owned by the listener beside its
@@ -1526,15 +1100,29 @@ impl CaptureHost {
         })
     }
 
+    /// The one active recording (a normal capture or a macOS replay
+    /// narration), as a single authority for start/stop/status checks.
+    fn live_recording(&self) -> Option<(PathBuf, CaptureInstant)> {
+        self.active
+            .as_ref()
+            .map(|active| (active.bundle.clone(), active.t0))
+            .or_else(|| {
+                self.replay
+                    .narrating_bundle()
+                    .zip(self.replay.narrating_since())
+            })
+    }
+
+    fn is_recording(&self) -> bool {
+        self.active.is_some() || self.replay.is_narrating()
+    }
+
     /// Whether a capture is recording, and since when. A capture whose
     /// engine failed to start is ended first, so it never turns the next
     /// shortcut press into a stop.
     pub fn recording_since(&mut self, audio: &impl AudioTimeline) -> Option<CaptureInstant> {
         self.reap(CaptureInstant::now(), audio);
-        self.active
-            .as_ref()
-            .map(|active| active.t0)
-            .or_else(|| self.replay.narrating_since())
+        self.live_recording().map(|(_, since)| since)
     }
 
     /// What the host is doing for the capture shortcut pressed at `at`.
@@ -1621,18 +1209,20 @@ impl CaptureHost {
 
     /// `hex annotate draw` (Linux, for desktops without the shortcuts
     /// portal): while a capture records it turns the pen on or off;
-    /// otherwise it starts one, and true says the pen should turn on once
-    /// its engine takes input.
+    /// otherwise it starts one and arms the pen to turn on once its engine
+    /// attaches.
     #[cfg(target_os = "linux")]
-    pub fn draw_shortcut(&mut self, audio: &impl AudioTimeline) -> bool {
+    pub fn draw_shortcut(&mut self, audio: &impl AudioTimeline) {
         if self.recording_since(audio).is_some() {
             toggle_pen();
-            return false;
+            return;
         }
-        !matches!(
+        if !matches!(
             self.shortcut(ShortcutAction::Record, audio),
             ControlReply::Error { .. }
-        )
+        ) {
+            drawing::arm_pen_on_attach();
+        }
     }
 
     /// The Annotate key went down (Linux: the portal's Activated, or the
@@ -1696,12 +1286,9 @@ impl CaptureHost {
                     let settings = crate::app_settings::capture_settings();
                     let captures = settings.captures_dir();
                     if captures.is_dir() {
-                        scrawl_capture::retention::run_pass(
+                        scrawl_capture::retention::clean_annotations(
                             &captures,
                             &settings.retention(),
-                            false,
-                            Duration::ZERO,
-                            false,
                             &Self::retention_trasher,
                         );
                     }
@@ -1768,8 +1355,12 @@ impl CaptureHost {
             CaptureCommand::Send { to, always } => {
                 Ok(self.route(routing::Job::Send { to, always }))
             }
+            CaptureCommand::SaveRule(kind, key, target) => {
+                Ok(self.route(routing::Job::SaveRule { kind, key, target }))
+            }
             CaptureCommand::Undo => Ok(self.route(routing::Job::Undo)),
             CaptureCommand::Hold(on) => Ok(self.route(routing::Job::Hold(on))),
+            CaptureCommand::Copy(bundle) => self.hand_off(HandOff::Copy, Some(bundle)),
             CaptureCommand::Paste(bundle) => self.hand_off(HandOff::Paste, Some(bundle)),
             CaptureCommand::Inspect => self.hand_off(HandOff::Inspect, None),
         };
@@ -1853,7 +1444,8 @@ impl CaptureHost {
             && let Some(active) = self.active.take()
         {
             self.input.recording(None);
-            let _ = audio.close_sink(now);
+            microphone::hide_level();
+            let _ = active.microphone.close(audio, now);
             self.ended.push(active.collector);
         }
     }
@@ -1909,11 +1501,7 @@ impl CaptureHost {
         if self.finisher.is_none() {
             return Some(ControlReply::error("busy", "Hex is stopping"));
         }
-        // Every unfinished capture but the recording one is stopped and
-        // writing or about to be.
-        let writing = lock(&self.outcomes).writing().saturating_sub(usize::from(
-            self.active.is_some() || self.replay.is_narrating(),
-        ));
+        let writing = lock(&self.outcomes).finishing_count();
         (writing >= MAX_FINISHING).then(|| {
             ControlReply::error(
                 "busy",
@@ -1933,7 +1521,7 @@ impl CaptureHost {
         quiet: Option<Quiet>,
         clip: bool,
     ) -> Result<ControlReply> {
-        if self.active.is_some() || self.replay.is_narrating() {
+        if self.is_recording() {
             return Ok(self.report(false, None));
         }
         if let Some(refused) = self.refuse_start() {
@@ -1961,10 +1549,34 @@ impl CaptureHost {
             .unwrap_or_else(|| crate::app_settings::capture_settings().captures_dir());
         let bundle = new_bundle_dir(&captures_dir)?;
         let (sink, chunks) = mpsc::sync_channel(SINK_CAPACITY);
-        if let Err(error) = audio.open_sink(sink, now) {
-            remove_bundle(&bundle);
-            return Err(error);
-        }
+        // A Screenshots recording keeps the microphone it asks for; every
+        // other capture copies the dictation timeline.
+        let screenshots = clip.then(crate::app_settings::screenshot_settings);
+        let choice = match &screenshots {
+            Some(settings) => {
+                microphone::Choice::of(&settings.record_microphone, audio.device_name().as_deref())
+            }
+            None => microphone::Choice::Timeline,
+        };
+        // "While dictating" quiets the computer for a voice over it; a
+        // recording of the computer's own sound, or with no voice, keeps it.
+        let silent = choice == microphone::Choice::Silent;
+        let quiet = if screenshots
+            .as_ref()
+            .is_some_and(|settings| !wants_quiet(settings.record_system_audio, &choice))
+        {
+            drop(quiet);
+            None
+        } else {
+            quiet.or_else(|| self.quiet())
+        };
+        let mut microphone = match microphone::Microphone::open(choice, audio, sink, now) {
+            Ok(microphone) => Some(microphone),
+            Err(error) => {
+                remove_bundle(&bundle);
+                return Err(error);
+            }
+        };
         // Unfinished from here until its collector or the finisher settles
         // it, whatever stop or cancel does meanwhile.
         lock(&self.outcomes).start(bundle.clone(), now, target.kind(), clip);
@@ -1979,28 +1591,37 @@ impl CaptureHost {
             thread::Builder::new()
                 .name("capture-audio".into())
                 .spawn(move || {
+                    let movie = movie_for(clip, &crate::app_settings::screenshot_settings());
                     let start = engine
                         .target(target)
-                        .map(|target| start_request(now, recording.clone(), target, clip));
+                        .map(|target| start_request(now, recording.clone(), target, movie));
                     collect(
                         &*engine, start, &recording, chunks, sealed, &jobs, &outcomes, &input,
+                        silent,
                     );
                 })
-                .inspect_err(|_| {
-                    let _ = audio.close_sink(now);
+                .inspect_err(|error| {
+                    if let Some(microphone) = microphone.take() {
+                        let _ = microphone.close(audio, now);
+                    }
                     remove_bundle(&bundle);
-                    lock(&self.outcomes).settle(bundle.clone(), Stage::Failed, None);
+                    lock(&self.outcomes)
+                        .settle(bundle.clone(), CaptureEnd::Failed(format!("{error:#}")));
                 })?
         };
         tracing::info!(bundle = %bundle.display(), ?target, "capture started");
+        if let Some(microphone) = &microphone {
+            microphone.show_level(clip);
+        }
         self.active = Some(Active {
             bundle,
             t0: now,
             target: target.kind(),
             seal,
             collector,
-            quiet: quiet.or_else(|| self.quiet()),
+            quiet,
             clip,
+            microphone: microphone.unwrap_or(microphone::Microphone::Timeline),
         });
         self.find_phone();
         Ok(self.report(true, None))
@@ -2036,8 +1657,9 @@ impl CaptureHost {
         };
         // Input after the stop belongs to no capture.
         self.input.recording(None);
+        microphone::hide_level();
         drop(active.quiet.take());
-        let closed = audio.close_sink(now).unwrap_or_else(|error| {
+        let closed = active.microphone.close(audio, now).unwrap_or_else(|error| {
             tracing::warn!(%error, "could not close the capture sink");
             None
         });
@@ -2073,16 +1695,23 @@ impl CaptureHost {
             if HANDING_OFF.swap(true, Ordering::AcqRel) {
                 return Ok(self.report(false, None));
             }
+            let outcomes = self.outcomes.clone();
             let spawned = std::thread::Builder::new()
                 .name("capture-hand-off".into())
                 .spawn(move || {
                     let done = hand_off(how, &bundle);
-                    if let Err(error) = done {
-                        tracing::warn!(
-                            error = format!("{error:#}"),
-                            ?how,
-                            "capture hand-off failed"
-                        );
+                    match done {
+                        Ok(()) if matches!(how, HandOff::Copy) => {
+                            lock(&outcomes).copied(&bundle);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = format!("{error:#}"),
+                                ?how,
+                                "capture hand-off failed"
+                            );
+                        }
+                        Ok(()) => {}
                     }
                     HANDING_OFF.store(false, Ordering::Release);
                 });
@@ -2105,15 +1734,7 @@ impl CaptureHost {
 
     fn report(&self, changed: bool, ended: Option<PathBuf>) -> ControlReply {
         let outcomes = lock(&self.outcomes);
-        let live_bundle = self
-            .active
-            .as_ref()
-            .map(|active| (active.bundle.clone(), active.t0))
-            .or_else(|| {
-                self.replay
-                    .narrating_bundle()
-                    .zip(self.replay.narrating_since())
-            });
+        let live_bundle = self.live_recording();
         let (state, bundle, elapsed_ms) = match &live_bundle {
             Some((bundle, t0)) => (
                 ScrawlCaptureState::Recording,
@@ -2128,16 +1749,7 @@ impl CaptureHost {
             bundle,
             elapsed_ms,
             finishing: outcomes
-                .unfinished
-                .iter()
-                .filter(|unfinished| {
-                    !unfinished.discarded
-                        && live_bundle
-                            .as_ref()
-                            .is_none_or(|(bundle, _)| *bundle != unfinished.bundle)
-                })
-                .map(|unfinished| unfinished.bundle.clone())
-                .collect(),
+                .finishing_bundles(live_bundle.as_ref().map(|(bundle, _)| bundle.as_path())),
             last: outcomes.last.as_ref().map(SettledCapture::outcome),
         }))
     }
@@ -2208,6 +1820,7 @@ pub enum Tapped {
 
 /// The capture is recording and its engine took input: the tap reports.
 static TAP_RECORDING: AtomicBool = AtomicBool::new(false);
+
 static TAP_INPUT: OnceLock<SyncSender<(CaptureInstant, Tapped)>> = OnceLock::new();
 static DROPPED_INPUT: AtomicUsize = AtomicUsize::new(0);
 
@@ -2226,8 +1839,8 @@ pub fn tapped_while(f: impl FnOnce()) -> Vec<Tapped> {
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-/// Whether the session tap should report pointer and key input: only while
-/// a capture records.
+/// The session tap reports pointer and key input: only while a capture
+/// records.
 pub fn wants_input() -> bool {
     #[cfg(test)]
     if TEST_TAP.with_borrow(Option::is_some) {
@@ -2255,277 +1868,6 @@ pub fn report_input(at: CaptureInstant, input: Tapped) {
     {
         DROPPED_INPUT.fetch_add(1, Ordering::Relaxed);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Drawing. One key does everything: a tap starts a recording and a tap
-// stops it; held while it records, the pointer draws (no click) until the
-// key comes up. The capsule's pen turns drawing on until it's clicked
-// again, the key is tapped or held and let go, or Escape. Shift still
-// draws on the Mac. While drawing, the ink overlay takes the pointer, so
-// clicks never reach the app; on Linux, where Wayland tells Hex nothing of
-// the pointer elsewhere, its moves are the strokes (`draw`).
-
-/// A press shorter than this is a tap; held longer while recording, it
-/// draws.
-pub const DRAW_HOLD: Duration = Duration::from_millis(250);
-
-/// When the Annotate key went down while a capture recorded, until it comes
-/// up.
-static DRAW_HELD: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-/// The capsule's pen is on.
-static PEN: AtomicBool = AtomicBool::new(false);
-/// The mouse button is down while the pen is on: the pen draws only then.
-static PEN_DOWN: AtomicBool = AtomicBool::new(false);
-
-fn draw_held() -> std::sync::MutexGuard<'static, Option<std::time::Instant>> {
-    DRAW_HELD.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-/// Whether the overlay takes the pointer now: only while a capture
-/// records, with the pen on or the Annotate key held past [`DRAW_HOLD`].
-pub fn drawing() -> bool {
-    wants_input() && (PEN.load(Ordering::Acquire) || key_held())
-}
-
-fn key_held() -> bool {
-    draw_held().is_some_and(|since| since.elapsed() >= DRAW_HOLD)
-}
-
-/// Whether a pointer move lays ink now: the held key draws as the pointer
-/// moves, with no click; the pen, like a real one, only while the button
-/// is down.
-fn inking() -> bool {
-    wants_input()
-        && (key_held() || (PEN.load(Ordering::Acquire) && PEN_DOWN.load(Ordering::Acquire)))
-}
-
-/// The mouse button went down (true) or up while the pen is on. Letting go
-/// ends the stroke.
-pub fn pen_button(down: bool) {
-    let was = PEN_DOWN.swap(down && drawing(), Ordering::AcqRel);
-    if was && !down && !key_held() {
-        end_stroke();
-    }
-}
-
-/// The Annotate key went down while a capture records.
-pub fn annotate_key_down() {
-    draw_held().get_or_insert_with(std::time::Instant::now);
-}
-
-/// What the Annotate key's release while recording was.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum KeyUp {
-    /// Not pressed while recording: nothing.
-    Unpressed,
-    /// Let go before [`DRAW_HOLD`]: the tap that stops the recording.
-    Tap,
-    /// Held to draw: drawing ends (the pen too) and the recording goes on.
-    Drew,
-}
-
-/// The Annotate key came up.
-pub fn annotate_key_up() -> KeyUp {
-    let Some(since) = draw_held().take() else {
-        return KeyUp::Unpressed;
-    };
-    if since.elapsed() < DRAW_HOLD {
-        return KeyUp::Tap;
-    }
-    PEN.store(false, Ordering::Release);
-    PEN_DOWN.store(false, Ordering::Release);
-    end_stroke();
-    KeyUp::Drew
-}
-
-/// The capsule's pen: drawing on until it's clicked again.
-pub fn toggle_pen() {
-    set_pen(!PEN.load(Ordering::Acquire));
-}
-
-/// Turns the pen on or off while a capture records.
-pub fn set_pen(on: bool) {
-    if !wants_input() {
-        PEN.store(false, Ordering::Release);
-        return;
-    }
-    PEN_DOWN.store(false, Ordering::Release);
-    if PEN.swap(on, Ordering::AcqRel) != on {
-        tracing::info!(on, "Annotate pen");
-        if !on {
-            end_stroke();
-        }
-    }
-}
-
-/// Escape: stops drawing, never the recording. True when something drew.
-pub fn exit_drawing() -> bool {
-    let drew = drawing();
-    *draw_held() = None;
-    PEN.store(false, Ordering::Release);
-    PEN_DOWN.store(false, Ordering::Release);
-    if drew {
-        end_stroke();
-    }
-    drew
-}
-
-/// Forgets the key and the pen: a new capture starts without drawing.
-fn reset_drawing() {
-    *draw_held() = None;
-    PEN.store(false, Ordering::Release);
-    PEN_DOWN.store(false, Ordering::Release);
-}
-
-/// Ends a stroke under way where the pointer is, as letting go of Shift does.
-fn end_stroke() {
-    let [x, y] = ink_source()
-        .map(|source| {
-            *source
-                .telemetry
-                .pointer_screen
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-        })
-        .unwrap_or_default();
-    report_input(
-        CaptureInstant::now(),
-        Tapped::Pointer(HostInput::Moved {
-            x: f64::from(x),
-            y: f64::from(y),
-            modifiers: Modifiers::default(),
-        }),
-    );
-}
-
-/// While drawing, every pointer event draws as if Shift alone were held,
-/// whatever the keys (the Annotate key's own modifiers included).
-fn as_pen(event: scrawl_capture::capture::InputEvent) -> scrawl_capture::capture::InputEvent {
-    use scrawl_capture::capture::InputEvent;
-    if !drawing() {
-        return event;
-    }
-    // The pen draws between the button's press and release; a press or
-    // release is never the app's click while drawing.
-    match event {
-        InputEvent::ButtonDown { right: false, .. } => pen_button(true),
-        InputEvent::ButtonUp { right: false, .. } => pen_button(false),
-        _ => {}
-    }
-    match event {
-        InputEvent::Move { t_ms, x, y, .. } => InputEvent::Move {
-            t_ms,
-            x,
-            y,
-            shift_only: inking(),
-        },
-        InputEvent::ButtonDown {
-            t_ms, x, y, right, ..
-        } => InputEvent::ButtonDown {
-            t_ms,
-            x,
-            y,
-            right,
-            shift_only: true,
-        },
-        InputEvent::ButtonUp {
-            t_ms, x, y, right, ..
-        } => InputEvent::ButtonUp {
-            t_ms,
-            x,
-            y,
-            right,
-            shift_only: true,
-        },
-        event => event,
-    }
-}
-
-/// The ink overlay's own space on Linux: the window its pointer moves in
-/// and the points its strokes are drawn in.
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct InkSpace {
-    /// The overlay is the XWayland window a compositor without layer-shell
-    /// gets (GNOME).
-    pub xwayland: bool,
-    /// The overlay's size in its own points, as the view laid it out, once
-    /// known (`Cx::layout_size`).
-    pub viewport: Option<[f32; 2]>,
-}
-
-/// The recorded screen in the ink overlay's points, so strokes land where
-/// they were drawn.
-///
-/// A native Wayland layer surface lays out in the desktop's logical points,
-/// which the portal's stream `size` (or the named output's xdg-output size)
-/// gives exactly, even at a fractional scale the overlay's integer buffer
-/// scale rounds up.
-///
-/// The XWayland window GNOME gets instead lays out in its own points, and
-/// the desktop's logical size is another space there: a compositor that
-/// scales XWayland natively leaves the overlay at the screen's pixels while
-/// the portal still reports the smaller logical layout (1536x960 for a
-/// 1920x1200 screen at 125%), so using it pins every stroke past 80% of the
-/// screen to the target's edge; one that scales X11 traditionally leaves the
-/// overlay at the logical layout while the stream is the screen's pixels. The
-/// overlay's own size is the only source right in both, and before the view
-/// knows it the recorded pixels over the overlay's scale stand in.
-#[cfg(target_os = "linux")]
-fn ink_points(
-    pixels: (u32, u32),
-    scale: f32,
-    logical: Option<(f64, f64)>,
-    space: InkSpace,
-) -> [f32; 2] {
-    let in_points = [pixels.0 as f32 / scale, pixels.1 as f32 / scale];
-    if space.xwayland {
-        return space
-            .viewport
-            .filter(|[width, height]| *width > 0.0 && *height > 0.0)
-            .unwrap_or(in_points);
-    }
-    logical.map_or(in_points, |(width, height)| [width as f32, height as f32])
-}
-
-/// A pointer move on the drawing overlay, at `x`, `y` in its points;
-/// `scale` is its pixels per point, and `space` is where it lays out
-/// (Linux). The capture's target becomes the recorded screen in that same
-/// space, so strokes land where they were drawn ([`ink_points`]).
-#[cfg(target_os = "linux")]
-pub fn draw(x: f32, y: f32, scale: f32, space: InkSpace) {
-    if !drawing() {
-        return;
-    }
-    if let Some((width, height)) = scrawl_capture::capture::recorded_screen()
-        && scale > 0.0
-        && let Some(source) = ink_source()
-    {
-        let logical = crate::linux::output::pen_points()
-            .or_else(scrawl_capture::capture::recorded_screen_points);
-        let area = ink_points((width, height), scale, logical, space);
-        let mut frame = source
-            .telemetry
-            .target_frame
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        frame.x = 0.0;
-        frame.y = 0.0;
-        frame.width = f64::from(area[0]);
-        frame.height = f64::from(area[1]);
-    }
-    report_input(
-        CaptureInstant::now(),
-        Tapped::Pointer(HostInput::Moved {
-            x: f64::from(x),
-            y: f64::from(y),
-            modifiers: Modifiers {
-                shift: inking(),
-                ..Modifiers::default()
-            },
-        }),
-    );
 }
 
 /// The modifiers in a CGEvent's flags.
@@ -2587,9 +1929,20 @@ impl InkSource {
 }
 
 #[derive(Default)]
-struct InputState {
-    recording: Option<PathBuf>,
-    target: Option<InputTarget>,
+enum InputState {
+    #[default]
+    Idle,
+    /// Capture started; engine has not attached its input sink yet.
+    Starting { bundle: PathBuf },
+    /// Engine attached and receiving translated input events.
+    Attached(InputTarget),
+}
+
+#[cfg(test)]
+impl InputState {
+    fn is_attached(&self) -> bool {
+        matches!(self, Self::Attached(_))
+    }
 }
 
 struct InputTarget {
@@ -2626,13 +1979,19 @@ impl LiveInput {
         self.0.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    /// The host started (`Some`) or ended a capture.
+    /// The host started (`Some`) or ended a capture. Always resets drawing so
+    /// a key held when a capture ends never leaks into the next capture.
     fn recording(&self, bundle: Option<&Path>) {
         let mut state = self.state();
-        state.recording = bundle.map(Path::to_path_buf);
-        state.target = None;
+        *state = match bundle {
+            Some(bundle) => InputState::Starting {
+                bundle: bundle.to_path_buf(),
+            },
+            None => InputState::Idle,
+        };
         set_ink(None);
         TAP_RECORDING.store(false, Ordering::Release);
+        drawing::reset();
         let dropped = DROPPED_INPUT.swap(0, Ordering::Relaxed);
         if dropped > 0 {
             tracing::warn!(dropped, "capture input queue was full; dropped input");
@@ -2651,35 +2010,31 @@ impl LiveInput {
         outcomes: &SharedOutcomes,
     ) {
         let mut state = self.state();
-        if state.recording.as_deref() != Some(bundle) {
+        if !matches!(&*state, InputState::Starting { bundle: current } if current == bundle) {
             return;
         }
         set_ink(Some(InkSource {
             telemetry: sink.telemetry().clone(),
             t0,
         }));
-        state.target = Some(InputTarget {
+        *state = InputState::Attached(InputTarget {
             bundle: bundle.to_path_buf(),
             sink,
             t0,
             rules: HostedInput::with_shift_held(shift_held),
             outcomes: Some(outcomes.clone()),
         });
-        reset_drawing();
         TAP_RECORDING.store(true, Ordering::Release);
+        drawing::on_attach();
     }
 
     fn detach(&self, bundle: &Path) {
         let mut state = self.state();
-        if state
-            .target
-            .as_ref()
-            .is_some_and(|target| target.bundle == bundle)
-        {
-            state.target = None;
+        if matches!(&*state, InputState::Attached(target) if target.bundle == bundle) {
+            *state = InputState::Idle;
             set_ink(None);
             TAP_RECORDING.store(false, Ordering::Release);
-            reset_drawing();
+            drawing::reset();
         }
     }
 
@@ -2689,9 +2044,10 @@ impl LiveInput {
     /// rules (Hex's windows are this process's).
     fn forward(&self, received: Receiver<(CaptureInstant, Tapped)>) {
         let mut pill = CapsulePill::default();
+        let mut picker = drawing::Picker::default();
         for (at, tapped) in received {
             let mut state = self.state();
-            let Some(target) = state.target.as_mut() else {
+            let InputState::Attached(target) = &mut *state else {
                 continue;
             };
             let t_ms = at
@@ -2711,7 +2067,8 @@ impl LiveInput {
                 #[cfg(not(target_os = "macos"))]
                 Tapped::Key { .. } => continue,
             };
-            let Some(event) = target.rules.translate(t_ms, input).map(as_pen) else {
+            let event = target.rules.translate(t_ms, input);
+            let Some(event) = event.and_then(|e| picker.pen(e)) else {
                 continue;
             };
             // A press or scroll on the capsule's pill is Hex's; anywhere
@@ -3018,13 +2375,14 @@ impl CaptureShortcut {
 }
 
 /// The keys the capsule takes from Hex's tap while it is on screen: it never
-/// takes focus, so these never reach the app in front.
+/// takes focus, so these never reach the app in front. Windows hands them over
+/// from its keyboard hook, where the overlay never takes the keyboard either.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapsuleKeys {
     /// The picker: the capture shortcut ([`CapsuleKey::Shortcut`]) and Escape.
     Picker,
-    /// The open list: every key press without ⌘ or ⌃ that isn't one of
-    /// Hex's shortcuts.
+    /// The open list: every key press without ⌘ or ⌃ (Ctrl, Alt or the Windows
+    /// key on Windows) that isn't one of Hex's shortcuts.
     List,
     /// A capture's suggestions: the capture shortcut, which opens the
     /// search ([`CapsuleKey::Shortcut`]), Shift, and a mouse press
@@ -3035,8 +2393,8 @@ pub enum CapsuleKeys {
     Suggest { cycle: bool, search: bool },
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-/// A key the capsule gets from Hex's tap.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+/// A key the capsule gets from Hex's tap, or from the Windows keyboard hook.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CapsuleKey {
     /// The capture shortcut: the picker records what it is on, and the
@@ -3144,13 +2502,13 @@ pub fn wants_escape() -> bool {
     GRAB_KEYS.load(Ordering::Acquire) == keys_code(Some(CapsuleKeys::Picker))
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 /// Whether the open list takes every key press at the tap.
 pub fn list_open() -> bool {
     GRAB_KEYS.load(Ordering::Acquire) == keys_code(Some(CapsuleKeys::List))
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 /// Whether the capsule's suggestions show, taking the capture shortcut.
 pub fn suggesting() -> bool {
     GRAB_KEYS.load(Ordering::Acquire)
@@ -3158,6 +2516,18 @@ pub fn suggesting() -> bool {
             cycle: false,
             search: false,
         }))
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+/// Whether the capsule takes text now: the open list, or suggestions the
+/// pointer moved onto (`CapsuleKeys::Suggest { search: true, .. }`). The
+/// Windows hook is its only reader: the macOS tap reads the character itself.
+pub fn takes_text() -> bool {
+    grab().as_ref().is_some_and(|grab| match grab.keys {
+        CapsuleKeys::List => true,
+        CapsuleKeys::Suggest { search, .. } => search,
+        CapsuleKeys::Picker => false,
+    })
 }
 
 /// Hands `key` to the capsule if its keys include it; false otherwise.
@@ -3299,7 +2669,14 @@ fn finish_captures(
         match finished {
             Ok(written) if clip => {
                 tracing::info!(bundle = %bundle.display(), words = written.words, "recording finished");
-                lock(outcomes).settle(bundle.clone(), Stage::Done, Some(written));
+                lock(outcomes).settle(
+                    bundle.clone(),
+                    CaptureEnd::Written {
+                        audio: written,
+                        copy_error: None,
+                        route: None,
+                    },
+                );
                 if let Some(written) = CLIP_WRITTEN.get() {
                     written(bundle);
                 }
@@ -3312,25 +2689,19 @@ fn finish_captures(
                     missing_transcript = written.missing_transcript.as_deref(),
                     "capture finished"
                 );
-                let copy_error = if crate::capture_zip::copy_as_zip(&bundle) {
-                    None
-                } else {
-                    copy_to_clipboard(&bundle)
-                        .err()
-                        .map(|error| format!("{error:#}"))
-                };
+                let copy_error = copy_bundle(&bundle).err().map(|error| format!("{error:#}"));
                 let route = look.as_ref().map(|_| CaptureRoute::looking());
                 #[cfg(target_os = "macos")]
                 if let Err(error) = paste_source::mark_ready(&bundle, crate::history::now_ms()) {
                     tracing::warn!(%error, "capture written without Paste Last provenance");
                 }
-                lock(outcomes).settle_with(
+                lock(outcomes).settle(
                     bundle.clone(),
-                    Stage::Done,
-                    Some(written),
-                    None,
-                    copy_error,
-                    route,
+                    CaptureEnd::Written {
+                        audio: written,
+                        copy_error,
+                        route,
+                    },
                 );
                 if let Some(look) = look {
                     let job = routing::Job::Written {
@@ -3343,8 +2714,9 @@ fn finish_captures(
                 }
             }
             Err(error) => {
-                tracing::error!(error = format!("{error:#}"), "capture failed");
-                lock(outcomes).settle(bundle, Stage::Failed, None);
+                let error = format!("{error:#}");
+                tracing::error!(error, "capture failed");
+                lock(outcomes).settle(bundle, CaptureEnd::Failed(error));
             }
         }
     }
@@ -3364,19 +2736,38 @@ pub fn on_clip_written(written: fn(PathBuf)) {
 /// What the capsule's Paste and Inspect do with the newest written capture.
 #[derive(Clone, Copy, Debug)]
 enum HandOff {
+    Copy,
     Paste,
     Inspect,
 }
 
-/// Pastes or opens a written capture: its contact sheet and summary.
+/// Copies a written capture to the clipboard as the writer does (ZIP when
+/// Labs › Copy a capture as one file is on, else the summary).
+fn copy_bundle(bundle: &Path) -> anyhow::Result<()> {
+    if crate::capture_zip::copy_as_zip(bundle) {
+        return Ok(());
+    }
+    copy_to_clipboard(bundle)
+}
+
+/// Copies, pastes, or opens a written capture: its contact sheet and summary.
 #[cfg(target_os = "macos")]
 fn hand_off(how: HandOff, bundle: &Path) -> anyhow::Result<()> {
     objc2::rc::autoreleasepool(|_| match how {
+        HandOff::Copy => copy_bundle(bundle),
         // ⌘V from Hex's keyboard layout snapshot, marked as Hex's: the
-        // crate's own reads TIS off the main thread.
-        HandOff::Paste => scrawl_capture::handoff::paste_bundle_with(bundle, &|| {
-            crate::keyboard::post_command('v').map_err(|error| anyhow::anyhow!("{error:#}"))
-        }),
+        // crate's own reads TIS off the main thread. A capture replaces what
+        // a dictation watch has in front of it, as another paste would.
+        HandOff::Paste => {
+            // macOS 27.3 refuses to post ⌘V without its keystroke grant, so
+            // fail before the clipboard changes instead of after.
+            crate::paste::ensure_keystroke_access()
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+            crate::paste::note_paste();
+            scrawl_capture::handoff::paste_bundle_with(bundle, &|| {
+                crate::keyboard::post_command('v').map_err(|error| anyhow::anyhow!("{error:#}"))
+            })
+        }
         HandOff::Inspect => inspect(bundle),
     })
 }
@@ -3387,6 +2778,7 @@ fn hand_off(how: HandOff, bundle: &Path) -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 fn hand_off(how: HandOff, bundle: &Path) -> anyhow::Result<()> {
     match how {
+        HandOff::Copy => copy_bundle(bundle),
         HandOff::Paste => {
             let (dir, loaded) = scrawl_capture::handoff::load_bundle(bundle)?;
             let summary = scrawl_capture::sketch::summary_markdown(&loaded, &dir);
@@ -3418,6 +2810,7 @@ fn hand_off(how: HandOff, bundle: &Path) -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 fn hand_off(how: HandOff, bundle: &Path) -> anyhow::Result<()> {
     match how {
+        HandOff::Copy => copy_bundle(bundle),
         HandOff::Paste => scrawl_capture::handoff::paste_bundle_image_and_text(bundle),
         HandOff::Inspect => inspect(bundle),
     }
@@ -3480,6 +2873,7 @@ fn collect(
     jobs: &SyncSender<FinishJob>,
     outcomes: &SharedOutcomes,
     input: &LiveInput,
+    silent: bool,
 ) {
     let bundle = bundle.to_path_buf();
     let capture = start.and_then(|start| {
@@ -3498,7 +2892,7 @@ fn collect(
             tracing::error!(error, "could not start the capture");
             drop(chunks);
             remove_bundle(&bundle);
-            lock(outcomes).fail(bundle, error);
+            lock(outcomes).settle(bundle, CaptureEnd::Failed(error));
             return;
         }
     };
@@ -3537,7 +2931,7 @@ fn collect(
                 timeline.discard();
                 capture.cancel();
                 remove_bundle(&bundle);
-                lock(outcomes).fail(bundle, error);
+                lock(outcomes).settle(bundle, CaptureEnd::Failed(error));
                 return;
             }
         }
@@ -3550,7 +2944,14 @@ fn collect(
             // The app in front now; its tab and terminal are read while the
             // capture is written.
             let context = capture.route_context();
-            let audio = timeline.finish(through, closed);
+            // With no microphone there's no audio.wav of silence to keep or
+            // transcribe.
+            let audio = if silent {
+                timeline.discard();
+                None
+            } else {
+                Some(timeline.finish(through, closed))
+            };
             let (give_look, look) = mpsc::sync_channel(1);
             // Starts are refused while the queue is full, so it has room
             // unless Hex is stopping.
@@ -3583,7 +2984,7 @@ fn collect(
             capture.cancel();
         }
     }
-    lock(outcomes).settle(bundle, Stage::Cancelled, None);
+    lock(outcomes).settle(bundle, CaptureEnd::Cancelled);
 }
 
 /// `hex dev capture-replay`: runs a capture through [`CaptureHost`] on a
@@ -3810,23 +3211,27 @@ mod tests {
             layer,
             alpha: 1.0,
         };
-        let (ink, capsule, app) = (11, 12, 13);
+        let (ink, capsule, app, dim) = (11, 12, 13, 14);
         let windows = [
             window(ink, own, [0.0, 0.0, 1728.0, 1117.0], 26),
             window(capsule, own, [544.0, 0.0, 640.0, 424.0], 27),
+            window(dim, own, [0.0, 0.0, 1728.0, 1117.0], 26),
             window(app, own + 1, [0.0, 0.0, 1728.0, 1117.0], 0),
         ];
-        let roles = OwnWindowIds {
+        let mut dims = [None; own_windows::DIM_WINDOWS];
+        dims[0] = Some(dim);
+        let roles = own_windows::OwnWindowIds {
             capsule: Some(capsule),
             ink: Some(ink),
             picker: None,
+            dims,
         };
         let OwnWindows {
             excluded,
             passthrough,
             ..
         } = own_windows_of(&roles);
-        assert_eq!(excluded, [capsule, ink]);
+        assert_eq!(excluded, [capsule, ink, dim]);
         let engine_says_hex = |x, y| {
             scrawl_capture::capture::on_own_window(
                 &windows,
@@ -3845,7 +3250,10 @@ mod tests {
         assert!(hex_takes(864.0, 36.0), "the pill");
         assert!(!hex_takes(600.0, 300.0), "the panel's empty part");
         assert!(!hex_takes(864.0, 100.0), "just under the pill");
-        assert!(!hex_takes(1500.0, 900.0), "under the ink overlay only");
+        assert!(
+            !hex_takes(1500.0, 900.0),
+            "under the ink overlay and a recording's dim only"
+        );
         assert_eq!(panel_origin(&windows, 99), None, "a panel not on screen");
     }
 
@@ -3892,11 +3300,46 @@ mod tests {
     }
 
     #[test]
-    fn a_screenshots_recording_keeps_every_pixel_and_a_capture_stays_compact() {
+    fn a_screenshots_recording_follows_its_settings_and_a_capture_stays_compact() {
+        use crate::app_settings::{MaxResolution, RecordingQuality, ScreenshotSettings};
+        use scrawl_capture::capture::MovieSize;
+        let defaults = ScreenshotSettings::default();
+        assert_eq!(
+            movie_for(true, &defaults),
+            MovieQuality::Full(MovieSize {
+                one_x: true,
+                long_edge: None,
+                fps: 30,
+                quality: 50,
+                system_audio: false,
+            })
+        );
+        let full = ScreenshotSettings {
+            scale_to_1x: false,
+            max_resolution: MaxResolution::P1080,
+            frame_rate: 60,
+            quality: RecordingQuality::Low,
+            ..defaults.clone()
+        };
+        assert_eq!(
+            movie_for(true, &full),
+            MovieQuality::Full(MovieSize {
+                one_x: false,
+                long_edge: Some(1920),
+                fps: 60,
+                quality: 20,
+                system_audio: false,
+            })
+        );
+        assert_eq!(movie_for(false, &full), MovieQuality::Compact);
         let t0 = CaptureInstant::now();
-        let movie = |clip| start_request(t0, PathBuf::new(), Target::ActiveDisplay, clip).movie;
-        assert_eq!(movie(true), MovieQuality::Full);
-        assert_eq!(movie(false), MovieQuality::Compact);
+        let start = start_request(
+            t0,
+            PathBuf::new(),
+            Target::ActiveDisplay,
+            MovieQuality::Compact,
+        );
+        assert_eq!(start.movie, MovieQuality::Compact);
     }
 
     #[test]
@@ -4192,8 +3635,10 @@ mod tests {
             fs::remove_dir_all(&self.dir).unwrap();
         }
 
-        fn finish(self: Box<Self>, audio: RecordedAudio) -> anyhow::Result<Written> {
+        fn finish(self: Box<Self>, audio: Option<RecordedAudio>) -> anyhow::Result<Written> {
             use scrawl_capture::model::{CaptureMode, TargetFrame, TargetInfo};
+            let audio =
+                audio.unwrap_or_else(|| RecordedAudio::new(Vec::new(), SAMPLE_RATE, 0, Vec::new()));
             self.steps
                 .lock()
                 .unwrap()
@@ -4260,7 +3705,7 @@ mod tests {
         audio: &FakeTimeline,
         bundle: &Path,
         idle: bool,
-    ) -> ScrawlCaptureOutcome {
+    ) -> crate::control::ScrawlCaptureOutcome {
         for _ in 0..1_000 {
             let status = report(host.control(ScrawlCaptureAction::Status, audio));
             if (!idle || status.finishing.is_empty())
@@ -4275,7 +3720,7 @@ mod tests {
     }
 
     #[test]
-    fn controls_are_idempotent_and_stop_writes_a_scrawl_bundle() {
+    fn controls_are_idempotent_and_stop_writes_a_hex_annotation() {
         let dir = temp_dir("control");
         let audio = FakeTimeline::default();
         let engine = FakeEngine::new(Arc::new(FakeTranscriber));
@@ -4359,8 +3804,10 @@ mod tests {
                 .iter()
                 .all(|sample| *sample != 0)
         );
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(bundle.join("scrawl.json")).unwrap()).unwrap();
+        let package: serde_json::Value =
+            serde_json::from_slice(&fs::read(bundle.join("annotation.json")).unwrap()).unwrap();
+        assert_eq!(package["formatVersion"], 1);
+        let manifest = &package["annotation"];
         let words = &manifest["transcript"]["words"];
         assert_eq!(manifest["transcript"]["text"], "hello there");
         assert_eq!(words[1]["text"], "there");
@@ -4475,6 +3922,82 @@ mod tests {
         assert!(audio.open.lock().unwrap().is_none(), "the sink is closed");
         host.shutdown(&audio);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_finisher_failure_reaches_the_capsule_with_its_reason() {
+        use crate::rune_ui::capture_capsule::{
+            feed::Follow,
+            flow::{Failure, Input},
+        };
+
+        struct FinishFails;
+        impl CaptureEngine for FinishFails {
+            fn start(&self, start: Start) -> anyhow::Result<Box<dyn Recording>> {
+                Ok(Box::new(FailOnFinish {
+                    dir: start.bundle_dir.unwrap(),
+                }))
+            }
+
+            fn phones(&self) -> anyhow::Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+        }
+        struct FailOnFinish {
+            dir: PathBuf,
+        }
+        impl Recording for FailOnFinish {
+            fn cancel(self: Box<Self>) {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+
+            fn stop(self: Box<Self>) -> Box<dyn Sealed> {
+                self
+            }
+        }
+        impl Sealed for FailOnFinish {
+            fn cancel(self: Box<Self>) {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+
+            fn finish(self: Box<Self>, _audio: Option<RecordedAudio>) -> anyhow::Result<Written> {
+                anyhow::bail!("disk full while writing bundle")
+            }
+        }
+
+        let dir = temp_dir("finish-fails");
+        let audio = FakeTimeline::default();
+        let mut host = CaptureHost::with(Arc::new(FinishFails), Some(dir.clone())).unwrap();
+        let bundle = report(host.control(ScrawlCaptureAction::Start, &audio))
+            .bundle
+            .unwrap();
+        lock(&host.outcomes).progress(&bundle, Stage::Recording);
+        let mut follow = Follow::default();
+        assert_eq!(
+            follow.next(&lock(&host.outcomes).snapshot()),
+            [Input::Stage(Stage::Recording)]
+        );
+        assert!(report(host.control(ScrawlCaptureAction::Stop, &audio)).changed);
+        let last = wait_for_last(&mut host, &audio, &bundle, true);
+        assert_eq!(last.stage, "failed");
+
+        let snapshot = lock(&host.outcomes).snapshot();
+        let settled = snapshot.last.as_ref().unwrap();
+        assert_eq!(settled.bundle, bundle);
+        assert_eq!(settled.stage, Stage::Failed);
+        assert_eq!(
+            settled.error.as_deref(),
+            Some("disk full while writing bundle")
+        );
+        assert_eq!(
+            follow.next(&snapshot),
+            [Input::Failed(
+                Failure::Save,
+                Some("disk full while writing bundle".into()),
+            )]
+        );
+        host.shutdown(&audio);
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -5126,6 +4649,49 @@ mod tests {
         fs::remove_dir_all(dir).ok();
     }
 
+    /// A Screenshots recording of the computer's sound must not mute it,
+    /// and one with no microphone has no voice to quiet anything for.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_screenshots_recording_quiets_only_for_a_voice_over_silence() {
+        use crate::audio::recording_environment::Effect::Mute;
+        use crate::audio::recording_environment::observed::{
+            self,
+            Event::{Held, Restored},
+        };
+        assert!(wants_quiet(false, &microphone::Choice::Timeline));
+        assert!(!wants_quiet(false, &microphone::Choice::Silent));
+        assert!(!wants_quiet(true, &microphone::Choice::Timeline));
+
+        let dir = temp_dir("clip-quiet");
+        let audio = FakeTimeline::default();
+        let mut host = CaptureHost::with(
+            FakeEngine::new(Arc::new(FakeTranscriber)),
+            Some(dir.clone()),
+        )
+        .unwrap();
+        let (environment, events) = observed::controller();
+        host.environment = Some(environment.clone());
+        host.audio_behavior = Some(crate::app_settings::RecordingAudioBehavior::Mute);
+        let settled = || observed::settled(&environment, &events);
+        let clip = || CaptureCommand::Clip(CaptureTarget::Pointer);
+
+        let bundle = report(host.command(clip(), &audio)).bundle.unwrap();
+        assert_eq!(settled(), [Held(Mute)]);
+        report(host.control(ScrawlCaptureAction::Cancel, &audio));
+        assert_eq!(settled(), [Restored(Mute)]);
+        wait_for_last(&mut host, &audio, &bundle, true);
+
+        crate::app_settings::queue_screenshot_choice(Arc::new(|settings| {
+            settings.record_system_audio = true;
+        }));
+        report(host.command(clip(), &audio)).bundle.unwrap();
+        assert_eq!(settled(), []);
+        host.shutdown(&audio);
+        assert_eq!(settled(), []);
+        fs::remove_dir_all(dir).ok();
+    }
+
     fn wait_until_idle_but_one(host: &CaptureHost) {
         for _ in 0..1_000 {
             if lock(&host.outcomes).unfinished.len() == 1 {
@@ -5149,10 +4715,10 @@ mod tests {
         let mut outcomes = lock(&host.outcomes);
         for index in 0..MAX_FINISHING {
             let bundle = dir.join(format!("gone-{index}"));
-            outcomes.started(bundle.clone(), t(0), TargetKind::Pointer);
+            outcomes.start(bundle.clone(), t(0), TargetKind::Pointer, false);
             outcomes.stopped(&bundle, End::Discard);
         }
-        assert_eq!(outcomes.writing(), 0);
+        assert_eq!(outcomes.finishing_count(), 0);
         drop(outcomes);
         assert!(
             report(host.command(CaptureCommand::Start(CaptureTarget::Pointer), &audio)).changed
@@ -5177,7 +4743,7 @@ mod tests {
             let mut outcomes = lock(&host.outcomes);
             for index in 0..MAX_FINISHING {
                 let bundle = dir.join(format!("writing-{index}"));
-                outcomes.started(bundle.clone(), t(0), TargetKind::Pointer);
+                outcomes.start(bundle.clone(), t(0), TargetKind::Pointer, false);
                 outcomes.stopped(&bundle, End::Finish);
             }
         }
@@ -5284,7 +4850,7 @@ mod tests {
         let live = LiveInput(Arc::default());
         let outcomes = SharedOutcomes::default();
         let bundle = PathBuf::from("/work.scrawl");
-        lock(&outcomes).started(bundle.clone(), t(0), TargetKind::Pointer);
+        lock(&outcomes).start(bundle.clone(), t(0), TargetKind::Pointer, false);
         live.recording(Some(&bundle));
         live.attach(&bundle, InputSink::default(), t(0), false, &outcomes);
         let (sender, received) = mpsc::sync_channel(4);
@@ -5323,14 +4889,14 @@ mod tests {
         live.recording(None);
         let outcomes = SharedOutcomes::default();
         live.attach(&first, sink.clone(), t(0), false, &outcomes);
-        assert!(live.state().target.is_none());
+        assert!(!live.state().is_attached());
         // An old collector detaching never takes the new capture's input.
         live.recording(Some(&second));
         live.attach(&second, sink, t(0), false, &outcomes);
         live.detach(&first);
-        assert!(live.state().target.is_some());
+        assert!(live.state().is_attached());
         live.recording(None);
-        assert!(live.state().target.is_none());
+        assert!(!live.state().is_attached());
     }
 
     #[cfg(target_os = "macos")]
@@ -5424,7 +4990,7 @@ mod tests {
             shortcut.input(key(true, chord), hotkeys, recording(2_000)),
             None
         );
-        *draw_held() = Some(std::time::Instant::now() - 2 * DRAW_HOLD);
+        drawing::age_key_down_for_test(2 * DRAW_HOLD);
         assert_eq!(
             shortcut.input(
                 InputEvent::Flags(OPTION_KEY_MASK),
@@ -5437,6 +5003,32 @@ mod tests {
             shortcut.input(key(false, 0), hotkeys, recording(2_610)),
             None
         );
+        // Capture ending while the Annotate key is held resets drawing so the
+        // next capture's tap finishes cleanly instead of reading as Drew.
+        let live = LiveInput::shared().expect("capture-input thread");
+        let first = PathBuf::from("/tmp/hex-draw-reset-1");
+        let second = PathBuf::from("/tmp/hex-draw-reset-2");
+        live.recording(Some(&first));
+        assert_eq!(
+            shortcut.input(key(true, chord), hotkeys, recording(3_000)),
+            None
+        );
+        drawing::age_key_down_for_test(2 * DRAW_HOLD);
+        // Capture 1 ends (e.g. capsule Stop) while the key is still down.
+        live.recording(Option::None);
+        // Releasing the old key after capture end must not spuriously finish.
+        assert_eq!(shortcut.input(key(false, 0), hotkeys, free), None);
+        // Capture 2 starts; a fresh tap before attach must stop it.
+        live.recording(Some(&second));
+        assert_eq!(
+            shortcut.input(key(true, chord), hotkeys, recording(400)),
+            None
+        );
+        assert_eq!(
+            shortcut.input(key(false, chord), hotkeys, recording(450)),
+            Finish
+        );
+        live.recording(Option::None);
         // While picking, the picker records.
         let picking = ShortcutActivity::Capsule;
         assert_eq!(shortcut.input(key(true, chord), hotkeys, picking), Pick);
@@ -5480,7 +5072,19 @@ mod tests {
             cycle: false,
             search: false,
         });
+        let dir = temp_dir("grab-activity");
+        let audio = FakeTimeline::default();
+        let mut host = CaptureHost::with(
+            FakeEngine::new(Arc::new(FakeTranscriber)),
+            Some(dir.clone()),
+        )
+        .unwrap();
         assert!(suggesting() && !wants_escape() && !list_open());
+        assert_eq!(
+            host.shortcut_activity(CaptureInstant::now(), &audio),
+            ShortcutActivity::Capsule,
+            "compact/suggesting capsule claims the capture shortcut"
+        );
         assert!(!capsule_key(CapsuleKey::Escape));
         assert!(capsule_key(CapsuleKey::Press), "a press may fold them");
         assert!(capsule_key(CapsuleKey::Shift(true)), "Shift shows the rule");
@@ -5531,6 +5135,13 @@ mod tests {
         assert!(capsule_key(CapsuleKey::Press));
         // The search lets the capture shortcut through: it records anew.
         assert!(!capsule_key(CapsuleKey::Shortcut));
+        assert_eq!(
+            host.shortcut_activity(CaptureInstant::now(), &audio),
+            ShortcutActivity::Free,
+            "open search list lets the listener record anew"
+        );
+        host.shutdown(&audio);
+        fs::remove_dir_all(dir).ok();
         drop(second);
         assert!(!picking() && !list_open());
         assert!(!capsule_key(CapsuleKey::Escape));
@@ -5598,7 +5209,7 @@ mod tests {
         let mut outcomes = Outcomes::on(feed);
         let (one, two) = (PathBuf::from("/c/one"), PathBuf::from("/c/two"));
         let since = CaptureInstant::from_nanos(5);
-        outcomes.started(one.clone(), since, TargetKind::Pointer);
+        outcomes.start(one.clone(), since, TargetKind::Pointer, false);
         let recording = watch.changed().unwrap();
         assert_eq!(
             recording.recording,
@@ -5628,19 +5239,22 @@ mod tests {
         );
 
         // A second capture records while the first is written.
-        outcomes.started(two.clone(), since, TargetKind::Window);
+        outcomes.start(two.clone(), since, TargetKind::Window, false);
         outcomes.stopped(&two, End::Cancel);
         // A cancelled capture's stage stays put.
         outcomes.progress(&two, Stage::Writing);
         outcomes.settle(
             one.clone(),
-            Stage::Done,
-            Some(Written {
-                words: 3,
-                gaps: 0,
-                audio_stopped_at_ms: None,
-                missing_transcript: None,
-            }),
+            CaptureEnd::Written {
+                audio: Written {
+                    words: 3,
+                    gaps: 0,
+                    audio_stopped_at_ms: None,
+                    missing_transcript: None,
+                },
+                copy_error: None,
+                route: None,
+            },
         );
         let done = watch.changed().unwrap();
         assert_eq!(
@@ -5677,15 +5291,39 @@ mod tests {
         assert_eq!(watch.changed(), None);
         assert_eq!(feed.snapshot(), done);
 
-        outcomes.settle(two.clone(), Stage::Cancelled, None);
+        outcomes.settle(two.clone(), CaptureEnd::Cancelled);
         let idle = watch.wait(Duration::from_secs(1)).unwrap();
         assert!(idle.recording.is_none() && idle.finishing.is_empty());
         assert_eq!(idle.last.unwrap().stage, Stage::Cancelled);
         assert!(outcomes.idle());
 
+        // Settling a discarded capture as Failed never replaces `last`.
+        let three = PathBuf::from("/c/three");
+        outcomes.start(three.clone(), since, TargetKind::Pointer, false);
+        outcomes.stopped(&three, End::Discard);
+        let before = watch.changed().unwrap();
+        assert_eq!(before.last.as_ref().unwrap().bundle, two);
+        outcomes.settle(three.clone(), CaptureEnd::Failed("late error".into()));
+        assert_eq!(watch.changed(), None);
+        assert!(outcomes.idle());
+        assert_eq!(feed.snapshot().last.as_ref().unwrap().bundle, two);
+
+        // Late progress after a Failed settle changes nothing.
+        let four = PathBuf::from("/c/four");
+        outcomes.start(four.clone(), since, TargetKind::Pointer, false);
+        outcomes.stopped(&four, End::Finish);
+        outcomes.settle(four.clone(), CaptureEnd::Failed("encoder exited".into()));
+        let failed = watch.changed().unwrap();
+        assert_eq!(
+            failed.last.as_ref().unwrap().error.as_deref(),
+            Some("encoder exited")
+        );
+        outcomes.progress(&four, Stage::Writing);
+        assert_eq!(watch.changed(), None);
+
         // A dropped watcher stops being woken.
         drop(watch);
-        outcomes.started(one, since, TargetKind::Pointer);
+        outcomes.start(one, since, TargetKind::Pointer, false);
         assert!(feed.watchers.lock().unwrap().is_empty());
     }
 
@@ -5740,7 +5378,7 @@ mod tests {
                 word_lag(*model),
                 Some(lag),
                 "{} has a new pinned file: measure its word lag again \
-                 (docs/plans/capture-in-hex.md) before keeping the correction",
+                 (docs/features/capture.md) before keeping the correction",
                 model.as_str()
             );
         }

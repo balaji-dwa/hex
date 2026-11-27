@@ -140,7 +140,8 @@ pub(super) enum Layer {
     Pending,
     /// The listening field and timer.
     Meter,
-    /// Stop and the three copies, in order of importance.
+    /// Stop, the two copies, and the open recording's foot, in order of
+    /// importance.
     Action(usize),
 }
 
@@ -444,10 +445,12 @@ impl Capsule {
     /// Where the surface is heading for what the capsule shows now, and
     /// whether its outline only follows the offer's own pages.
     pub(super) fn stage_target(&mut self, now: f64) -> Option<(Target, bool)> {
+        // The resting pill keeps every capsule's corners: nothing about
+        // its silhouette changes as it opens but its size.
         let pill = |w: f32| Outline {
             w,
             h: REST_HEIGHT,
-            radius: REST_HEIGHT / 2.0,
+            radius: PANEL_RADIUS,
             dark: 1.0,
         };
         let panel = |h: f32| Outline {
@@ -466,17 +469,13 @@ impl Capsule {
             field: waveform::WIDTH,
         };
         // A surface that is leaving says nothing it hadn't already said.
-        let may_say = self.kind.is_some() || self.stage.presence(Layer::Pending).shows();
-        let target = match self
-            .kind
-            .as_ref()
-            .or(self.surface.ghost.as_ref().map(|(kind, _)| kind))
-        {
-            Some(Kind::Offer(..)) if self.presentation.departing() => Target {
+        let may_say = self.is_shown() || self.stage.presence(Layer::Pending).shows();
+        let target = match self.drawn() {
+            Some(State::Offer { .. }) if self.presentation.departing() => Target {
                 pending: may_say.then(|| self.presentation.begun(now) + PENDING_LABEL_AFTER),
                 ..none
             },
-            Some(Kind::Offer(..)) => {
+            Some(State::Offer { .. }) => {
                 let target = Target {
                     outline: self.presentation.outline(self.reduced.get()),
                     offer: true,
@@ -484,26 +483,38 @@ impl Capsule {
                 };
                 return Some((target, true));
             }
-            Some(Kind::Recording(shown)) => {
-                let open = self.open();
+            Some(State::Recording {
+                recording: shown,
+                hovered,
+                stopping,
+                confirming,
+            }) => {
+                let open = *hovered || *stopping;
+                let outline = if open {
+                    // The question hugs its words and buttons.
+                    panel(if *confirming {
+                        panel::CONFIRM_HEIGHT
+                    } else {
+                        panel::open_height(self, shown)
+                    })
+                } else {
+                    pill(panel::rest_width(shown))
+                };
+                let field = panel::field_wanted(self);
                 if !open {
                     self.stage.opened = None;
                 }
                 Target {
-                    outline: if open {
-                        panel(panel::open_height(shown))
-                    } else {
-                        pill(panel::rest_width(shown))
-                    },
+                    outline,
                     meter: true,
                     actions: open.then(|| *self.stage.opened.get_or_insert(now)),
-                    field: panel::field_wanted(self),
+                    field,
                     ..none
                 }
             }
             // Capture has ended: Stop leaves, and the surface finishes its
             // way to the open panel the finished meeting's layout grows from.
-            Some(Kind::Finalizing { .. } | Kind::Ready(_)) => Target {
+            Some(State::Finalizing { .. } | State::Ready { .. }) => Target {
                 outline: panel(panel::open_height_without_notice()),
                 meter: true,
                 actions: Some(self.stage.opened.unwrap_or(f64::MIN)),
@@ -520,9 +531,10 @@ impl Capsule {
     pub(super) fn step_stage(&mut self, now: f64, tx: &mut Tx) -> bool {
         let reduced = self.reduced.get();
         let surface = self.step_surface(now, tx);
-        let paging = matches!(self.drawn(), Some(Kind::Offer(..)))
+        let offer_open = self.drawn().is_some_and(State::more_open);
+        let paging = matches!(self.drawn(), Some(State::Offer { .. }))
             && !self.presentation.departing()
-            && self.presentation.step(self.more_open, reduced, now);
+            && self.presentation.step(offer_open, reduced, now);
         let Some((target, follow)) = self.stage_target(now) else {
             self.stage = Stage::default();
             return surface;
@@ -540,7 +552,7 @@ impl Capsule {
         } else {
             self.stage.step(&target, reduced, now)
         };
-        if matches!(self.kind, Some(Kind::Recording(_))) {
+        if matches!(self.state, State::Recording { .. }) {
             self.presentation.arrived(&self.stage);
         }
         if stepped != Stepped::Still {
@@ -560,10 +572,10 @@ impl Capsule {
             Some((target, _)) => self.stage.land(&target, now),
             None => self.stage = Stage::default(),
         }
-        if matches!(self.kind, Some(Kind::Recording(_))) {
+        if matches!(self.state, State::Recording { .. }) {
             self.presentation.arrived(&self.stage);
         }
-        self.surface.settle(self.kind.is_some());
+        self.surface.settle(self.is_shown());
     }
 
     /// A handler changed what the capsule shows: the surface starts toward

@@ -28,6 +28,50 @@ impl CapsLockLight {
     }
 }
 
+/// How a normal dictation's text is written (Labs › Dictation style): the
+/// iPhone app's four styles. Every choice is punctuation and case rules
+/// only, with no model.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationStyle {
+    /// Full sentences: fillers trimmed, each sentence capitalized and
+    /// ended, and informal English contractions written out.
+    #[default]
+    Polished,
+    /// Texting: sentences may start lowercase, "I" is "i", an opening
+    /// interjection loses its comma, and a short message its final period.
+    Casual,
+    /// Concise lines, with a list when several items are said.
+    Notes,
+    /// Exactly as the speech model wrote it.
+    Verbatim,
+}
+
+impl DictationStyle {
+    /// Every choice, in the order the window shows them.
+    pub const ALL: [Self; 4] = [Self::Polished, Self::Casual, Self::Notes, Self::Verbatim];
+
+    /// The English label the window shows.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Polished => "Polished",
+            Self::Casual => "Casual",
+            Self::Notes => "Notes",
+            Self::Verbatim => "Verbatim",
+        }
+    }
+
+    /// What the choice does, in one line under the label.
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::Polished => "Full sentences, fillers trimmed",
+            Self::Casual => "Texting: lowercase start, no final period",
+            Self::Notes => "Short lines, a list for several items",
+            Self::Verbatim => "Exact words from the model",
+        }
+    }
+}
+
 /// The main window's appearance: the OS's, or one forced on it (Labs ›
 /// Appearance).
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -56,7 +100,7 @@ impl AppearanceTheme {
     }
 }
 
-/// The `labs` switches (`crate::labs`), each off by default; older Labs features keep their own keys, and retired switches (`labs.enabled`, `labs.collapsible_meeting_sections`, `labs.meeting_platform_icons`, `labs.transcribe_files`, `labs.restore_shortcut_default`, `labs.yearly_stats`, and the graduated meeting labs) are ignored.
+/// The `labs` switches (`crate::labs`), each off by default; older Labs features keep their own keys, and retired switches (`labs.enabled`, `labs.collapsible_meeting_sections`, `labs.meeting_platform_icons`, `labs.transcribe_files`, `labs.restore_shortcut_default`, `labs.yearly_stats`, `labs.dictate_while_annotating`, and the graduated meeting labs) are ignored.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct LabsSettings {
@@ -64,6 +108,9 @@ pub struct LabsSettings {
     pub planner: bool,
     /// Live text beside the HUD while dictating.
     pub live_text: bool,
+    /// Live text with a shorter lookahead, so its words appear sooner at a
+    /// little more GPU work (Parakeet buffered streaming).
+    pub faster_live_text: bool,
     /// A failed dictation's explanation beside the HUD for a few seconds.
     pub failure_notices: bool,
     /// Provisional words in the focused text field as a Wayland input-method
@@ -71,11 +118,12 @@ pub struct LabsSettings {
     pub live_typing: bool,
     pub live_chapters: bool,
     pub playground: bool,
-    /// Parakeet transcription biased toward the vocabulary.
-    pub vocabulary_biasing: bool,
     /// Names and terms shown in the focused window become temporary
     /// vocabulary for each dictation (macOS).
     pub screen_vocabulary: bool,
+    /// A name fixed in text Hex just pasted is added to Vocabulary, read
+    /// from that field alone for a few minutes after the paste (macOS).
+    pub learn_from_corrections: bool,
     /// The mode's OpenCode rewrite reads the text around the cursor as
     /// context (macOS); password fields are never read.
     pub cursor_context: bool,
@@ -104,6 +152,10 @@ pub struct LabsSettings {
     /// Filler words such as "um" and "uh" are removed from dictations (issue 631).
     pub filler_words: bool,
     pub clean_up_with_apple_intelligence: bool,
+    /// A dictation in a mode that opts in is rewritten into plain, neutral
+    /// wording on this Mac instead of the OpenCode rewrite and the cleanup
+    /// (macOS).
+    pub neutral_voice: bool,
     /// `second_dictation_hotkey` dictates like the dictation shortcut (issue 627).
     pub second_dictation_shortcut: bool,
     /// Up to four more dictation shortcuts, each with its own activation
@@ -132,12 +184,13 @@ pub struct LabsSettings {
     /// Menu, Pause, and Scroll Lock may be shortcut keys (Linux, issue 767).
     pub standalone_special_keys: bool,
     pub history_stats: bool,
+    /// History draws the Dictation stats dialog's headline numbers as one
+    /// compact strip above its list; it needs `history_stats` too.
+    pub history_stats_strip: bool,
     pub recent_dictations: bool,
     pub skip_pauses: bool,
     /// Output's Try card offers Vocabulary and Fix this beside its result (issue 989).
     pub output_fixes: bool,
-    /// The speech model picker lists the model in use first (issue 1019).
-    pub picker_active_first: bool,
     /// The picker's "Use model file where it is…" adds a GGUF file without copying it (issue 941).
     pub model_in_place: bool,
     /// An import may use Q6_K, Q5_K, or Q4_K weights, which Metal runs and
@@ -156,17 +209,17 @@ pub struct LabsSettings {
     /// A kept recording may be copied from History and the menu bar or tray
     /// as a file on the clipboard; it stores no audio itself.
     pub copy_dictation_audio: bool,
-    /// The sidebar footer links this build's release notes.
-    pub release_notes_link: bool,
     pub hide_menu_bar_icon: bool,
-    /// ⌘Q closes the Settings window instead of quitting Hex (macOS).
-    pub quit_closes_window: bool,
     /// A Caps Lock press starts and stops dictation, and its light follows
     /// Hex's recording and processing (macOS).
     pub caps_lock_dictation: bool,
     /// Whether that light stays solid or blinks slowly while recording
     /// (macOS).
     pub caps_lock_light: CapsLockLight,
+    /// Holding the middle mouse button for half a second starts a hands-free
+    /// dictation and the next long press finishes it; clicks still reach the
+    /// app, and Escape cancels any hands-free dictation (macOS).
+    pub middle_mouse_dictation: bool,
     /// The main window is forced light or dark instead of following the OS
     /// (Labs › Appearance).
     pub appearance: bool,
@@ -179,10 +232,28 @@ pub struct LabsSettings {
     pub typed_text: bool,
     /// At either visible indicator position, the HUD grows out of the notch on a screen with one (macOS).
     pub notch_indicator: bool,
+    /// With the HUD position Bottom, the plate sits `hud_bottom_gap` points
+    /// above the Dock or the screen's bottom edge (macOS, Labs › HUD height).
+    pub hud_height: bool,
+    /// The gap in points above the Dock while `hud_height` is on; a saved
+    /// value above [`HUD_BOTTOM_GAP_MAX`] is clamped at placement.
+    pub hud_bottom_gap: u16,
+    /// While a dictation records and processes, the HUD sits just below the
+    /// pointer (above it near the screen's bottom), on the pointer's screen
+    /// and inside its visible frame, instead of at the Top or Bottom position;
+    /// Hidden still hides it (macOS, Labs › Indicator follows mouse).
+    pub indicator_follows_mouse: bool,
+    /// Dictation's microphone opens through Apple's voice processing, so
+    /// Control Center's Mic Mode can offer Voice Isolation (macOS, Labs ›
+    /// Voice isolation).
+    pub voice_isolation: bool,
     /// The meeting capsules float on a running XWayland on Wayland desktops without layer-shell, such as GNOME (Linux, issue 1274).
     pub gnome_meeting_capsules: bool,
     /// Annotate's capsule and ink float on a running XWayland on Wayland desktops without layer-shell, such as GNOME (Linux).
     pub gnome_annotate: bool,
+    /// On Wayland, a screen capture asks the desktop for the monitor under the
+    /// pointer, and each monitor keeps its own ScreenCast choice (Linux).
+    pub annotate_pointer_screen: bool,
     /// The screenshot shortcut takes an area or a window (macOS); its
     /// shortcut and folder are `screenshots.*`.
     pub screenshots: bool,
@@ -191,15 +262,32 @@ pub struct LabsSettings {
     pub copy_capture_zip: bool,
     /// Meetings offers Import audio…: a local audio file becomes a meeting (macOS).
     pub meeting_import: bool,
+    /// A saved meeting's transcript offers line selection and deletion.
+    pub transcript_edits: bool,
+    /// Meetings stops an offered or by-hand call recording (and a calendar
+    /// reminder's on macOS) 30 s after its call app leaves the microphone, as
+    /// Always record's Stop when the call ends does.
+    pub stop_any_call_recording: bool,
+    /// A meeting recording can leave the microphone out of its track while
+    /// the call's own audio keeps recording and transcribing (macOS; Labs ›
+    /// Mute the microphone while recording).
+    pub meeting_microphone_mute: bool,
+    /// The meeting recording indicator stays on the display it was dragged
+    /// to, instead of only the primary display (macOS and Windows).
+    pub meeting_indicator_display: bool,
+    /// A meeting's computer audio records one app or one output device
+    /// instead of every output (every OS; Labs › Choose meeting audio).
+    pub meeting_audio_source: bool,
+    /// Which app or output that is while `meeting_audio_source` is on. A
+    /// malformed saved value is dropped by the settings loader, so this
+    /// reads as all computer audio.
+    pub meeting_audio_source_choice: crate::meeting::audio_source::SourceChoice,
     /// With `labs.annotate_replay` on, keeps a rolling 15 s display buffer via `SCClipBufferingOutput` (macOS 27+).
     pub annotate_replay: bool,
     /// An OpenCode service running in the default WSL distribution is used
-    /// for Modes rewriting and the Modes model picker when no Windows
-    /// service answers (Windows).
+    /// for Modes rewriting and the Modes model picker ahead of a Windows one
+    /// when it answers; Windows answers when WSL answers nothing (Windows).
     pub opencode_in_wsl: bool,
-    /// `hex completions <shell>` prints a completion script for bash, zsh,
-    /// fish, elvish, or PowerShell, generated from Hex's own commands.
-    pub shell_completions: bool,
     /// Press Return after pasting a shortcut dictation.
     pub yolo_mode: bool,
     /// The apps Labs › YOLO mode sends in, by the names
@@ -212,6 +300,19 @@ pub struct LabsSettings {
     /// Holding Paste Last opens a picker of recent dictations and
     /// annotations, and History lists them together (macOS).
     pub paste_last_picker: bool,
+    /// The Vocabulary sheet imports terms from a CSV file and exports the
+    /// list as one (Labs › Vocabulary files).
+    pub vocabulary_files: bool,
+    /// The menu bar's Vocabulary submenu adds a term or opens the sheet, and
+    /// lists the last five saved terms (macOS; Labs › Vocabulary menu).
+    pub vocabulary_menu: bool,
+    /// `hex annotate inspect`, `zoom`, `frames`, and `skill` read a capture
+    /// bundle for a coding agent (Labs › Agent tools for captures).
+    pub annotate_agent_tools: bool,
+    /// The Annotate pane's Agents section writes the hex-annotate skill into
+    /// coding agents' own folders and, on macOS, links `hex` onto PATH
+    /// (Labs › Install agent skill from Annotate).
+    pub annotate_agent_install: bool,
     /// The local API's `process=global` returns transcripts after Global
     /// mode's output processing.
     pub api_processing: bool,
@@ -220,18 +321,15 @@ pub struct LabsSettings {
     pub api_timestamps: bool,
     /// Team sign-in (macOS Dev lab).
     pub team_auth: bool,
-    /// Web pages from `api_browser_origins` may call Hex's local API from
-    /// the browser (Labs › Browser access to the local API).
-    pub api_browser_access: bool,
-    /// The origins allowed while `api_browser_access` is on, each
-    /// `scheme://host[:port]`; an entry that isn't one is ignored.
-    pub api_browser_origins: Vec<String>,
     /// "While dictating" applies only while the default output is speakers;
     /// headphones are left alone.
     pub speakers_only: bool,
     /// A dictation mode's speech model and language follow the foreground
     /// application (macOS and Windows).
     pub app_model_switching: bool,
+    /// `model_switch_hotkey` swaps the dictation selection with the saved
+    /// other model and language, and back.
+    pub model_switch_shortcut: bool,
     /// The menu bar lists the next calendar meetings, each a local start and
     /// end time and title; choosing one with a call link opens it (macOS,
     /// with Meetings on and a calendar connected).
@@ -243,9 +341,6 @@ pub struct LabsSettings {
     /// The menu bar offers Pause Hex, which makes every capture shortcut
     /// inert until Resume (macOS).
     pub pause_menu: bool,
-    /// `hex dictation start --print` records a dictation whose transcript
-    /// goes to the command that started it, however it ends (macOS).
-    pub print_start: bool,
     /// A spoken trigger phrase inside a dictation hands the mode's OpenCode
     /// model a one-off instruction for that dictation.
     pub voice_prompt: bool,
@@ -254,6 +349,12 @@ pub struct LabsSettings {
     /// returns to its default.
     #[serde(deserialize_with = "deserialize_phrase")]
     pub voice_prompt_phrase: String,
+    /// Every normal dictation is written in `dictation_style_choice`'s
+    /// style, after corrections and any rewrite and before transformations.
+    pub dictation_style: bool,
+    /// Which of the four styles it is written as while `dictation_style` is
+    /// on.
+    pub dictation_style_choice: DictationStyle,
     /// A spoken phrase at the end of a hands-free dictation finishes it as if
     /// the shortcut were pressed again, and never reaches the pasted text.
     pub stop_phrase: bool,
@@ -262,6 +363,25 @@ pub struct LabsSettings {
     /// field returns to its default.
     #[serde(deserialize_with = "deserialize_phrase")]
     pub stop_phrase_text: String,
+    /// Once a dictation has recorded for 10 seconds, its cancel shortcut asks
+    /// for a second press before it throws the recording away (#2837).
+    pub confirm_long_cancels: bool,
+    /// Every normal dictation is signed with `signature_text` on its own line
+    /// at the end (every OS).
+    pub signature: bool,
+    /// The line appended while `signature` is on: one line of at most 200
+    /// characters, empty appending nothing. Another value fails to load, so
+    /// the field returns to its default.
+    #[serde(deserialize_with = "deserialize_signature")]
+    pub signature_text: String,
+    /// A spoken phrase inside a normal dictation becomes the clipboard's
+    /// text in double quotes before it is pasted (every OS).
+    pub clipboard_phrase: bool,
+    /// The words replaced while `clipboard_phrase` is on: at least two words
+    /// and six letters, or the default. Another value fails to load, so the
+    /// field returns to its default.
+    #[serde(deserialize_with = "deserialize_phrase")]
+    pub clipboard_phrase_text: String,
     /// A key or click joining a held modifier-only shortcut a second or more
     /// after it went down reaches the app in front and leaves the dictation
     /// recording, which the release still finishes (macOS and Windows).
@@ -294,6 +414,14 @@ pub struct LabsSettings {
 
 /// The idle times Labs › Free memory when idle offers, in minutes.
 pub const UNLOAD_IDLE_MINUTES: [u32; 4] = [5, 15, 30, 60];
+
+/// The gap above the Dock or the screen's bottom edge the dictation HUD
+/// keeps while Labs › HUD height is off, in points.
+pub const HUD_BOTTOM_GAP_DEFAULT: u16 = 24;
+
+/// The highest gap Labs › HUD height offers, in points. Placement clamps it
+/// further so the plate stays inside the visible frame.
+pub const HUD_BOTTOM_GAP_MAX: u16 = 400;
 
 /// The times Labs › Keep mic open after dictating offers, in seconds:
 /// 30 s, 1, 3, 5, and 30 minutes.
@@ -351,7 +479,8 @@ where
     }
 }
 
-/// A saved phrase (`voice_prompt_phrase`, `stop_phrase_text`) must pass
+/// A saved phrase (`voice_prompt_phrase`, `stop_phrase_text`,
+/// `clipboard_phrase_text`) must pass
 /// [`crate::dictation::voice_prompt::phrase_problem`]; another value fails to
 /// load, so the field returns to the default with the usual launch note.
 fn deserialize_phrase<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -366,17 +495,33 @@ where
     }
 }
 
+/// A saved `signature_text` must pass
+/// [`crate::dictation::signature::text_problem`]; another value fails to
+/// load, so the field returns to the default with the usual launch note.
+fn deserialize_signature<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let signature = String::deserialize(deserializer)?;
+    let signature = signature.trim();
+    match crate::dictation::signature::text_problem(signature) {
+        Some(problem) => Err(serde::de::Error::custom(problem)),
+        None => Ok(signature.to_owned()),
+    }
+}
+
 impl Default for LabsSettings {
     fn default() -> Self {
         Self {
             planner: false,
             live_text: false,
+            faster_live_text: false,
             failure_notices: false,
             live_typing: false,
             live_chapters: false,
             playground: false,
-            vocabulary_biasing: false,
             screen_vocabulary: false,
+            learn_from_corrections: false,
             cursor_context: false,
             mouse_shortcuts: false,
             unload_idle: false,
@@ -389,6 +534,7 @@ impl Default for LabsSettings {
             spoken_formatting: false,
             filler_words: false,
             clean_up_with_apple_intelligence: false,
+            neutral_voice: false,
             second_dictation_shortcut: false,
             more_dictation_shortcuts: false,
             terminal_paste_shortcut: false,
@@ -402,10 +548,10 @@ impl Default for LabsSettings {
             parakeet_ultra: false,
             standalone_special_keys: false,
             history_stats: false,
+            history_stats_strip: false,
             recent_dictations: false,
             skip_pauses: false,
             output_fixes: false,
-            picker_active_first: false,
             model_in_place: false,
             k_quant_models: false,
             picker_downloaded: false,
@@ -413,45 +559,63 @@ impl Default for LabsSettings {
             microphone_key: false,
             keep_recordings: false,
             copy_dictation_audio: false,
-            release_notes_link: false,
             hide_menu_bar_icon: false,
-            quit_closes_window: false,
             caps_lock_dictation: false,
             caps_lock_light: CapsLockLight::Steady,
+            middle_mouse_dictation: false,
             appearance: false,
             appearance_theme: AppearanceTheme::System,
             gnome_clipboard_restore: false,
             typed_text: false,
             notch_indicator: false,
+            hud_height: false,
+            hud_bottom_gap: HUD_BOTTOM_GAP_DEFAULT,
+            indicator_follows_mouse: false,
+            voice_isolation: false,
             annotate_replay: false,
             opencode_in_wsl: false,
-            shell_completions: false,
             yolo_mode: false,
             yolo_mode_apps: Vec::new(),
             drop_transcribe: false,
             paste_last_picker: false,
+            vocabulary_files: false,
+            vocabulary_menu: false,
+            annotate_agent_tools: false,
+            annotate_agent_install: false,
             api_processing: false,
             api_timestamps: false,
             team_auth: false,
-            api_browser_access: false,
-            api_browser_origins: Vec::new(),
             speakers_only: false,
             app_model_switching: false,
+            model_switch_shortcut: false,
             calendar_menu: false,
             calendar_bulk_select: false,
             pause_menu: false,
-            print_start: false,
             voice_prompt: false,
             voice_prompt_phrase: crate::dictation::voice_prompt::DEFAULT_PHRASE.to_owned(),
+            dictation_style: false,
+            dictation_style_choice: DictationStyle::Polished,
             stop_phrase: false,
             stop_phrase_text: crate::dictation::stop_phrase::DEFAULT_PHRASE.to_owned(),
+            confirm_long_cancels: false,
+            signature: false,
+            signature_text: crate::dictation::signature::DEFAULT_TEXT.to_owned(),
+            clipboard_phrase: false,
+            clipboard_phrase_text: crate::dictation::clipboard_phrase::DEFAULT_PHRASE.to_owned(),
             hold_through_keys: false,
             modes_editor: false,
             gnome_meeting_capsules: false,
             gnome_annotate: false,
+            annotate_pointer_screen: false,
             screenshots: false,
             copy_capture_zip: false,
             meeting_import: false,
+            transcript_edits: false,
+            stop_any_call_recording: false,
+            meeting_microphone_mute: false,
+            meeting_indicator_display: false,
+            meeting_audio_source: false,
+            meeting_audio_source_choice: crate::meeting::audio_source::SourceChoice::All,
             groups: std::collections::BTreeMap::new(),
             stop_when_call_ends: None,
             meeting_descriptive_filenames: None,
@@ -459,5 +623,19 @@ impl Default for LabsSettings {
             expire_meeting_audio: None,
             yearly_stats: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An older settings file has no `hud_bottom_gap`, and the struct's
+    /// default supplies the fixed 24 pt.
+    #[test]
+    fn a_saved_file_without_the_hud_gap_keeps_the_fixed_default() {
+        let labs: LabsSettings = serde_json::from_str(r#"{"notch_indicator":true}"#).unwrap();
+        assert_eq!(labs.hud_bottom_gap, HUD_BOTTOM_GAP_DEFAULT);
+        assert!(!labs.hud_height);
     }
 }

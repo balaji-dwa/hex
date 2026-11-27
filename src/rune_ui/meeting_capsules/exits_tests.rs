@@ -223,8 +223,10 @@ fn several_titles_in_quick_succession_show_one_at_a_time() {
         if was.title != now.title && was.title.is_some() {
             // The old words had gone (under 5 parts in 100) before the new
             // ones were drawn, and those start from nothing.
+            // The finished meeting's title is its link, which fades in
+            // from its first frame.
             assert!(
-                was.title_shown < 0.05 && now.title_shown < 0.02,
+                was.title_shown < 0.05 && now.title_shown < 0.05,
                 "f{}: {:?} → {:?} at {} → {}",
                 frame + 1,
                 was.title,
@@ -303,7 +305,7 @@ fn what_is_leaving_takes_no_input() {
     rt.pointer_down(record.0, record.1);
     rt.pointer_up(record.0, record.1);
     rt.frame(1. / 60.);
-    assert!(commands.try_recv().is_err() && rt.state.kind.is_none());
+    assert!(commands.try_recv().is_err() && !rt.state.is_shown());
 
     let (mut rt, commands, _) = runtime(ready_summarized(), false, true, ready_size());
     let copy = rt.find("copy-all").unwrap();
@@ -315,7 +317,7 @@ fn what_is_leaving_takes_no_input() {
     rt.pointer_up(copy.0, copy.1);
     rt.frame(1. / 60.);
     assert!(rt.copy_request.is_none() && commands.try_recv().is_err());
-    assert!(!rt.state.hovered);
+    assert!(!rt.state.hovered());
 }
 
 /// Once capture has ended nothing on the surface reads as live: the time

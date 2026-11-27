@@ -99,7 +99,8 @@ pub(super) fn presence(surface: &Surface, rect: [f32; 4], reduced: bool) -> Tran
 }
 
 /// The capsule in its `PANEL_W` × `PANEL_H` panel. Its live chips and
-/// buttons and the list are the only `.hit()` boxes: a click anywhere else
+/// buttons and the list are its `.hit()` boxes (and, on Windows, the open
+/// search's field, which has no tap there to feed it): a click anywhere else
 /// on it reaches the app beneath, and hover still comes from the pointer.
 pub(super) fn capsule(
     p: Paint,
@@ -173,6 +174,13 @@ pub(super) fn capsule(
     {
         root = root.child(list_view(p, list, x, w, reduced));
     }
+    if let Pres::Done(Done {
+        always_popover: Some(config),
+        ..
+    }) = &surface.pres
+    {
+        root = root.child(always_view::always_view(p, config, reduced));
+    }
     root
 }
 
@@ -213,7 +221,7 @@ pub(super) fn shell(p: Paint, surface: &Surface, meter: &Meter) -> El {
                 .opacity(if surface.shell_on { 1.0 } else { 0.0 })
                 .opacity_motion(surface.shell_fade);
         }
-        return body.role("group").label(tr("Capture"));
+        return body.role("group").label(tr("Annotate"));
     }
     body = body.fill(k.c.bg_base);
     for shadow in &k.elevation.overlay {
@@ -243,7 +251,7 @@ pub(super) fn shell(p: Paint, surface: &Surface, meter: &Meter) -> El {
         .motion(surface.shell_motion)
         .opacity_motion(surface.shell_fade)
         .role("group")
-        .label(tr("Capture"))
+        .label(tr("Annotate"))
 }
 
 pub(super) fn label(content: &str, style: rune::TextStyle, color: Color) -> El {
@@ -360,10 +368,17 @@ pub(super) fn item(p: Paint, surface: &Surface, live: &Animated, shown: &Shown) 
                 .hit()
                 .on_press_tx(press(id)),
         ),
-        Id::Lead => placed(el(), shown)
-            .trace_name("lead")
-            .child(dot(p, &live.meter))
-            .child(timer(p, surface, live)),
+        Id::Lead => {
+            let lead = placed(el(), shown)
+                .trace_name("lead")
+                .child(dot(p, &live.meter))
+                .child(timer(p, surface, live));
+            if surface.metered {
+                lead.child(level(p, surface, &live.meter))
+            } else {
+                lead
+            }
+        }
         Id::Processing => placed(el(), shown)
             .trace_name("processing")
             .child(spinner(p, &live.meter))
@@ -373,9 +388,14 @@ pub(super) fn item(p: Paint, surface: &Surface, live: &Animated, shown: &Shown) 
                 Pres::Done(done) => done.lead,
                 _ => Lead::Check,
             };
-            let ink = match tuning::get().top_line {
-                tuning::TopLine::Quiet => p.muted(),
-                tuning::TopLine::Icons => p.text(),
+            let strong = matches!(&surface.pres, Pres::Done(done) if done.strong_text);
+            let ink = if strong {
+                p.text()
+            } else {
+                match tuning::get().top_line {
+                    tuning::TopLine::Quiet => p.muted(),
+                    tuning::TopLine::Icons => p.text(),
+                }
             };
             let mut done = placed(el(), shown).trace_name("done").child(glyph(
                 p,
@@ -410,7 +430,7 @@ pub(super) fn item(p: Paint, surface: &Surface, live: &Animated, shown: &Shown) 
                     .press(c.pressed)
                     .role("button")
                     .label(format!("{} · {}", shown.ident, tr("Inspect")))
-                    .help(tr("Open the capture"))
+                    .help(tr("Open the annotation"))
                     .hit()
                     .on_press_tx(press(Id::Inspect));
             }
@@ -431,16 +451,110 @@ pub(super) fn item(p: Paint, surface: &Surface, live: &Animated, shown: &Shown) 
         Id::Why => placed(row().center_y(), shown)
             .trace_name("why")
             .child(quiet(p, shown.text(), done_style())),
-        // The quiet way out of a send that just went.
+        // The quiet way out of a send that just went, matching Paste's button
+        // box height and corners.
         // Click only: Escape meant for another app was taking sends back.
         Id::Undo => {
-            let [_, _, w, h] = shown.rect;
+            let bw = shown.rect[2] - 2.0 * surface::BUTTON_INSET;
             let ground = if surface.anchor == surface::Anchor::Notch {
                 c.black
             } else {
                 c.bg_base
             };
-            undo_ring::chip(p, base, [w, h], ground, live.ring.as_ref()).on_press_tx(press(id))
+            base.child(undo_ring::chip(
+                p,
+                button_box(p, bw),
+                [bw, BUTTON_H],
+                ground,
+                live.ring.as_ref(),
+            ))
+            .role("button")
+            .label(surface::undo_label())
+            .hit()
+            .on_press_tx(press(id))
+        }
+        // Unified destination split chip: one fill, no vertical divider,
+        // each half its own clickable target.
+        Id::Split => {
+            let queued = shown.active;
+            let help = match &surface.pres {
+                Pres::Done(Done {
+                    split: Some(split), ..
+                }) => split.help.clone(),
+                _ => None,
+            };
+            let glyph = if queued {
+                &crate::rune_ui::icons::CLOCK
+            } else {
+                &rune_theme_opencode::icons::ARROW_RIGHT
+            };
+            let send_w = surface::split_send_width(&shown.ident);
+            let inner_w = send_w + surface::CHEVRON_W;
+            let mut left = row()
+                .key("send")
+                .size(send_w, BUTTON_H)
+                .pl(8.0)
+                .gap(4.0)
+                .center_y()
+                .radius(ICON_BUTTON_RADIUS)
+                .hover(c.hover)
+                .press(c.pressed)
+                .role("button")
+                .label(if queued {
+                    tr_fill("Queued for {}", &shown.ident)
+                } else {
+                    tr_fill("Send to {}", &shown.ident)
+                })
+                .hit()
+                .on_press_tx(press(if queued { Id::More } else { Id::QuickSend }))
+                .child(rune::icon(glyph, surface::SEND_ICON).color(p.muted()))
+                .child(label(&shown.ident, medium(), p.text()));
+            if let Some(tip) = help {
+                left = left.help(tip);
+            }
+            let more = row()
+                .key("more")
+                .size(surface::CHEVRON_W, BUTTON_H)
+                .center()
+                .radius(ICON_BUTTON_RADIUS)
+                .hover(c.hover)
+                .press(c.pressed)
+                .role("button")
+                .label(tr("Send to…"))
+                .help(tr("Choose another session"))
+                .hit()
+                .on_press_tx(press(Id::More))
+                .child(
+                    rune::icon(&rune_theme_opencode::icons::CHEVRON_DOWN, 14.0).color(p.muted()),
+                );
+            base.child(
+                row()
+                    .key("split-fill")
+                    .size(inner_w, BUTTON_H)
+                    .radius(ICON_BUTTON_RADIUS)
+                    .fill(c.layer_02)
+                    .child(left)
+                    .child(more),
+            )
+        }
+        // Post-send `Always…` button beside Undo: quiet at rest, filled while open.
+        Id::Always => {
+            let bw = shown.rect[2] - 2.0 * surface::BUTTON_INSET;
+            let lit = shown.active;
+            let mut box_el = button_box(p, bw);
+            if lit {
+                box_el = box_el.fill(c.layer_02);
+            }
+            base.child(box_el.child(label(
+                &shown.ident,
+                medium(),
+                if lit { p.text() } else { p.muted() },
+            )))
+            .role("button")
+            .label(shown.ident.clone())
+            .checked(lit)
+            .hit()
+            .on_press_tx(press(id))
         }
         Id::Search => {
             let keys = chord(&surface::shortcut_keycaps());
@@ -484,6 +598,16 @@ pub(super) fn item(p: Paint, surface: &Surface, live: &Animated, shown: &Shown) 
                 .hit()
                 .on_press_tx(press(id))
         }
+        Id::Ask if shown.active => base
+            .child(
+                button_box(p, shown.rect[2] - 2.0 * surface::BUTTON_INSET)
+                    .fill(c.layer_02)
+                    .child(label(&shown.ident, medium(), p.text())),
+            )
+            .role("button")
+            .label(shown.ident.clone())
+            .hit()
+            .on_press_tx(press(id)),
         Id::Ask => keyed(p, base, &[], &shown.ident, medium()).on_press_tx(press(id)),
         // The line's one worded action: a filled button the height of the
         // icon buttons beside it, so the three are one row of boxes 6 pt
@@ -504,7 +628,7 @@ pub(super) fn item(p: Paint, surface: &Surface, live: &Animated, shown: &Shown) 
                 .child(mark(id, 16.0, p.muted()))
                 .role("button")
                 .label(tr("Inspect"))
-                .help(tr("Open the capture"))
+                .help(tr("Open the annotation"))
                 .hit()
                 .on_press_tx(press(id)),
         ),
@@ -517,10 +641,28 @@ pub(super) fn item(p: Paint, surface: &Surface, live: &Animated, shown: &Shown) 
                 }) => typed,
                 _ => &empty,
             };
-            field(p, base, typed)
+            let text = field(p, base, typed);
+            // Windows takes the field's clicks in the overlay's input shape
+            // (Rune's native regions): without a hit box there, the window
+            // stays click-through over it and a click lands on the app in
+            // front. Elsewhere the tap feeds the field and a click is the
+            // app's, so its regions stay the buttons' and the list's.
+            if cfg!(target_os = "windows") {
+                text.hit()
+            } else {
+                text
+            }
         }
-        // Rows live in the list, never in the capsule.
-        Id::Row(_) => base,
+        // Rows and popover actions live outside the capsule bar.
+        Id::Row(_)
+        | Id::QuickSend
+        | Id::More
+        | Id::AlwaysScopeNarrow
+        | Id::AlwaysScopeWide
+        | Id::AlwaysToSession
+        | Id::AlwaysToProject
+        | Id::AlwaysSave
+        | Id::OpenRules => base,
     }
 }
 
@@ -632,7 +774,9 @@ pub(super) fn glyph(p: Paint, lead: Lead, thumb: Option<&rune::Pixels>) -> El {
         (Lead::Check | Lead::Thumbnail, _) => {
             rune::icon(p.k.glyph.check_small, CHECK).color(p.success())
         }
-        (Lead::Warning, _) => mark(Id::Why, CHECK, p.k.c.warning.fg),
+        (Lead::Warning, _) => {
+            rune::icon(&rune_theme_opencode::icons::WARNING_BOLD, CHECK).color(p.k.c.warning.icon)
+        }
     };
     glyph.absolute(8.0, (CHIP_H - CHECK) * 0.5)
 }
@@ -696,10 +840,31 @@ pub(super) fn thumbnail(p: Paint, pixels: &rune::Pixels) -> El {
 /// as the clock.
 pub(super) fn timer(p: Paint, surface: &Surface, live: &Animated) -> El {
     row().center_y().absolute(LEAD_TEXT_X, 0.0).h(CHIP_H).child(
-        label(&surface.clock, clock_style(), p.text())
+        label(&surface.clock, p.clock(), p.text())
             .live_text(&live.clock)
             .w(clock_width(&surface.clock)),
     )
+}
+
+/// The microphone's level after the timer: three bars as tall as the
+/// recording hears it, dim while it hears nothing.
+pub(super) fn level(p: Paint, surface: &Surface, meter: &Meter) -> El {
+    let mut bars = el()
+        .absolute(LEAD_TEXT_X + clock_width(&surface.clock) + LEVEL_GAP, 0.0)
+        .size(LEVEL_W, CHIP_H)
+        .live_opacity(&meter.level_ink)
+        .a11y_hidden();
+    for live in &meter.level_bars {
+        let [x, y, w, h] = live.get();
+        bars = bars.child(
+            el().absolute(x, y)
+                .size(w, h)
+                .radius(1.0)
+                .fill(p.text())
+                .live_rect(live),
+        );
+    }
+    bars
 }
 
 /// "Processing…", each glyph at its place in the shaped label and lit by

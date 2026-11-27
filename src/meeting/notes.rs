@@ -17,8 +17,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::generator::{self, GeneratedNotes, GenerationError, NotesWriter};
 use super::{
-    MeetingManifest, MeetingStatus, TranscriptEntry, TranscriptReader, coalesce_transcript,
-    format_duration, read_manifest, root, sync_directory, write_manifest,
+    Labels, MeetingManifest, MeetingStatus, TranscriptEntry, TranscriptReader, coalesce_transcript,
+    format_duration, read_manifest, root, write_manifest,
 };
 use crate::desktop::events::now_ms;
 
@@ -134,13 +134,13 @@ pub(super) fn excerpt_budget(context_tokens: usize, cap: usize) -> usize {
 
 /// Coalesced turns as `[mm:ss] You: text` lines, split at word boundaries
 /// so no line exceeds `LINE_CHARS`.
-fn transcript_lines(entries: &[TranscriptEntry]) -> Vec<String> {
+fn transcript_lines(entries: &[TranscriptEntry], labels: Labels<'_>) -> Vec<String> {
     let mut lines = Vec::new();
     for turn in coalesce_transcript(entries.iter().cloned()) {
         let prefix = format!(
             "[{}] {}: ",
             format_duration(turn.start_ms),
-            turn.source.label()
+            labels.of(&turn)
         );
         let mut line = prefix.clone();
         for word in turn.text.split_whitespace() {
@@ -168,8 +168,12 @@ pub(super) struct Excerpt {
 /// The whole transcript when it fits in `max_chars`; otherwise the opening,
 /// evenly spaced passages from the middle, and the ending, with `[…]` where
 /// lines were skipped.
-pub(super) fn excerpt(entries: &[TranscriptEntry], max_chars: usize) -> Excerpt {
-    let lines = transcript_lines(entries);
+pub(super) fn excerpt(
+    entries: &[TranscriptEntry],
+    labels: Labels<'_>,
+    max_chars: usize,
+) -> Excerpt {
+    let lines = transcript_lines(entries, labels);
     let size = |range: std::ops::Range<usize>| -> usize {
         lines[range.clone()].iter().map(String::len).sum::<usize>() + range.len().saturating_sub(1)
     };
@@ -252,8 +256,28 @@ pub(super) fn summarize_entries(
     max_chars: usize,
     deadline: Instant,
     generate: impl FnMut(&str, &str, Duration) -> Result<GeneratedNotes, GenerationError>,
-) -> Result<Summary> {
-    summarize_with_calendar(entries, None, &[], max_chars, deadline, generate)
+) -> Result<Option<Summary>> {
+    summarize_with_calendar(
+        entries,
+        Labels::default(),
+        None,
+        &[],
+        max_chars,
+        deadline,
+        generate,
+    )
+}
+
+/// The published lines a summary is generated from, read fresh so an edit
+/// that landed first is what the prompt sees.
+pub(super) fn summary_entries(directory: &Path) -> Result<Vec<TranscriptEntry>> {
+    super::read_ndjson(&directory.join("transcript.ndjson"))
+}
+
+/// Whether these entries hold any speech worth summarizing. An empty
+/// transcript is not a notes failure: there is simply nothing to write.
+fn has_speech(entries: &[TranscriptEntry]) -> bool {
+    entries.iter().any(|entry| !entry.text.trim().is_empty())
 }
 
 /// The most attendee names a notes prompt lists.
@@ -287,17 +311,18 @@ fn calendar_preamble(calendar: Option<&super::MeetingCalendar>) -> String {
     preamble
 }
 
-/// [`summarize_entries`] with the vocabulary's `terms` (empty leaves them
-/// out) and the calendar event as
+/// [`summarize_entries`] under the meeting's own `labels`, with the
+/// vocabulary's `terms` (empty leaves them out) and the calendar event as
 /// context. Both count against the excerpt budget.
 pub(super) fn summarize_with_calendar(
     entries: &[TranscriptEntry],
+    labels: Labels<'_>,
     calendar: Option<&super::MeetingCalendar>,
     terms: &[String],
     max_chars: usize,
     deadline: Instant,
     mut generate: impl FnMut(&str, &str, Duration) -> Result<GeneratedNotes, GenerationError>,
-) -> Result<Summary> {
+) -> Result<Option<Summary>> {
     let preamble = format!(
         "{}{}",
         super::chapters::vocabulary_line(terms),
@@ -306,9 +331,9 @@ pub(super) fn summarize_with_calendar(
     let mut max_chars = max_chars.saturating_sub(preamble.len()).max(1);
     let mut calls = 0;
     loop {
-        let excerpt = excerpt(entries, max_chars);
+        let excerpt = excerpt(entries, labels, max_chars);
         if excerpt.text.is_empty() {
-            return Err(eyre!("the transcript has no speech to summarize"));
+            return Ok(None);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -318,7 +343,7 @@ pub(super) fn summarize_with_calendar(
         let prompt = format!("{preamble}Meeting transcript:\n\n{}", excerpt.text);
         match generate(NOTES_INSTRUCTIONS, &prompt, remaining.min(CALL_TIMEOUT)) {
             Ok(notes) => {
-                return Ok(Summary {
+                return Ok(Some(Summary {
                     notes: GeneratedNotes {
                         title: clean_title(&notes.title),
                         summary: clean_summary(&notes.summary),
@@ -327,7 +352,7 @@ pub(super) fn summarize_with_calendar(
                     excerpt_chars: excerpt.text.len(),
                     transcript_chars: excerpt.transcript_chars,
                     calls,
-                });
+                }));
             }
             Err(GenerationError::ContextWindow) if calls == 1 => max_chars /= 2,
             Err(error) => return Err(eyre!("{error}")),
@@ -644,7 +669,7 @@ pub(super) fn provisional_title(
     timeout: Duration,
     generate: impl FnOnce(&str, &str, Duration) -> Result<String, GenerationError>,
 ) -> Result<String> {
-    let excerpt = excerpt(entries, max_chars);
+    let excerpt = excerpt(entries, Labels::default(), max_chars);
     if excerpt.text.is_empty() {
         return Err(eyre!("the transcript has no speech yet"));
     }
@@ -778,52 +803,53 @@ fn apply_notes_to_export(
     Ok(())
 }
 
-/// The file is replaced atomically, and only if nothing changed it meanwhile.
-/// `written` is the SHA-256 of the copy Hex last wrote; it follows the
-/// rewrite only while the file was still that copy, so a file the user
-/// edited never becomes Hex's to expire.
+/// Rewrites the whole user-facing Markdown copy from the current manifest
+/// and `entries` after transcript lines were deleted. Only a copy Hex still
+/// wrote is touched: a file the user edited, or one with no recorded hash,
+/// is left alone. The transcript edit clears notes and chapters first, so
+/// the new document has none of their old text.
+pub(super) fn rewrite_export_transcript(
+    manifest: &mut MeetingManifest,
+    entries: &[TranscriptEntry],
+) -> Result<()> {
+    let Some(path) = manifest.export_path.clone().filter(|path| path.exists()) else {
+        return Ok(());
+    };
+    let mut written = manifest.export_sha256.clone();
+    super::write::markdown::rewrite(
+        &path,
+        &mut written,
+        super::write::markdown::RewritePolicy::WholeFileIfOwned,
+        |_| super::markdown::render_document(manifest, entries),
+    )?;
+    manifest.export_sha256 = written;
+    Ok(())
+}
+
+/// Merge only Hex's known sections. The shared writer rechecks observed
+/// bytes after syncing the temporary, without acquiring edited-file ownership.
 fn rewrite_markdown_file(
     path: &Path,
     written: &mut Option<String>,
     rewrite: impl FnOnce(&str) -> String,
 ) -> Result<()> {
-    let original =
-        fs::read_to_string(path).wrap_err_with(|| format!("could not read {}", path.display()))?;
-    let updated = rewrite(&original);
-    if updated == original {
-        return Ok(());
-    }
-    let unchanged = written.as_deref() == Some(super::text_sha256(original.as_bytes()).as_str());
-    let folder = path
-        .parent()
-        .ok_or_else(|| eyre!("{} has no folder", path.display()))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| eyre!("{} has no name", path.display()))?
-        .to_string_lossy();
-    let temporary = folder.join(format!(".{name}.notes.tmp"));
-    fs::write(&temporary, &updated)?;
-    if let Ok(metadata) = fs::metadata(path) {
-        let _ = fs::set_permissions(&temporary, metadata.permissions());
-    }
-    crate::durable::sync_file(&temporary)?;
-    if fs::read_to_string(path).ok().as_deref() != Some(original.as_str()) {
-        let _ = fs::remove_file(&temporary);
-        return Err(eyre!("the Markdown changed while it was being updated"));
-    }
-    fs::rename(&temporary, path)?;
-    if unchanged {
-        *written = Some(super::text_sha256(updated.as_bytes()));
-    }
-    Ok(sync_directory(folder)?)
+    super::write::markdown::rewrite(
+        path,
+        written,
+        super::write::markdown::RewritePolicy::MergeKnownSections,
+        rewrite,
+    )
+    .map(|_| ())
 }
 
 static IN_PROGRESS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-struct InProgress(String);
+pub(super) struct InProgress(String);
 
 impl InProgress {
-    fn claim(id: &str) -> Option<Self> {
+    /// Claims the process-local writer slot for notes, transcript edits and
+    /// renames. It does not lock out another process or the active recorder.
+    pub(super) fn claim(id: &str) -> Option<Self> {
         IN_PROGRESS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -876,43 +902,69 @@ pub fn summarize(id: &str) -> Result<MeetingManifest> {
 }
 
 /// Generates and records notes while holding this meeting's claim.
-fn summarize_claimed(id: &str, _claim: InProgress) -> Result<MeetingManifest> {
-    let directory = root()?.join(id);
-    let mut manifest = read_manifest(&directory)?;
+fn summarize_claimed(id: &str, claim: InProgress) -> Result<MeetingManifest> {
+    summarize_in(&root()?.join(id), id, claim)
+}
+
+/// Generates notes for the meeting in `directory`.
+fn summarize_in(directory: &Path, id: &str, claim: InProgress) -> Result<MeetingManifest> {
+    summarize_with(directory, id, claim, generator::generate_notes)
+}
+
+/// [`summarize_in`] with the notes call injected. A transcript with no speech
+/// writes no notes and clears any earlier notes error: there is nothing to
+/// summarize, so nothing failed, and the writer is never asked.
+fn summarize_with(
+    directory: &Path,
+    id: &str,
+    claim: InProgress,
+    mut generate: impl FnMut(&str, &str, Duration) -> Result<GeneratedNotes, GenerationError>,
+) -> Result<MeetingManifest> {
+    let mut manifest = read_manifest(directory)?;
     if manifest.status != MeetingStatus::Complete {
         return Err(eyre!("only completed meetings can be summarized"));
+    }
+    let entries = summary_entries(directory)?;
+    if !has_speech(&entries) {
+        tracing::info!(
+            meeting = id,
+            "nothing to summarize: the transcript has no speech"
+        );
+        if manifest.notes_error.is_some() {
+            manifest.notes_error = None;
+            write_manifest(directory, &manifest)?;
+        }
+        return Ok(manifest);
     }
     // A writer that isn't there (OpenCode not running, Apple Intelligence
     // off) is the meeting's notes error, so the pane says why.
     if let Err(reason) = generator::available() {
         tracing::warn!(%reason, meeting = id, "could not generate meeting notes");
         manifest.notes_error = Some(reason.clone());
-        write_manifest(&directory, &manifest)?;
+        write_manifest(directory, &manifest)?;
         return Err(eyre!("{reason}"));
     }
-    let entries = super::read_ndjson(&directory.join("transcript.ndjson"))?;
     let never = AtomicBool::new(false);
     if crate::labs::live_chapters() {
-        super::chapters::refine_meeting(&directory, &entries, &never);
+        super::chapters::refine_meeting(directory, &entries, &never);
     }
     // Read at each generation, so Regenerate summary uses the current list.
     let terms = crate::dictation::vocabulary::terms();
     let started = Instant::now();
     let result = summarize_with_calendar(
         &entries,
+        Labels::by_track(&manifest.speakers),
         manifest.calendar.as_ref(),
         &terms,
         excerpt_budget(generator::context_tokens(), FINAL_EXCERPT_CHARS),
         started + TOTAL_DEADLINE,
         |instructions, prompt, timeout| {
             wait_for_dictation(&never);
-            generator::generate_notes(instructions, prompt, timeout)
+            generate(instructions, prompt, timeout)
         },
     );
-    // Re-read so concurrent manifest updates are not lost.
-    let mut manifest = read_manifest(&directory)?;
     match result {
-        Ok(summary) => {
+        Ok(Some(summary)) => {
             tracing::info!(
                 meeting = id,
                 excerpt_chars = summary.excerpt_chars,
@@ -921,88 +973,54 @@ fn summarize_claimed(id: &str, _claim: InProgress) -> Result<MeetingManifest> {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "generated meeting notes"
             );
-            let previous_title = display_title(&manifest);
-            manifest.notes = Some(MeetingNotes::from_summary(summary, started.elapsed()));
-            manifest.notes_error = None;
-            let title = display_title(&manifest);
-            if let Err(error) = apply_notes_to_export(
-                &mut manifest,
-                &previous_title,
-                &title,
+            publish_notes(
+                directory,
+                claim,
+                MeetingNotes::from_summary(summary, started.elapsed()),
                 crate::app_settings::meeting_descriptive_filenames(),
                 crate::app_settings::meeting_notes_file(),
-            ) {
-                tracing::warn!(%error, meeting = id, "could not add notes to meeting Markdown");
-                manifest.notes_error = Some(format!("Notes not added to Markdown: {error}"));
-            }
-            write_manifest(&directory, &manifest)?;
+            )
+        }
+        // Defensive fallback: `has_speech` returned above for a transcript
+        // with no lines, and `excerpt` yields "[…]" for any line.
+        Ok(None) => {
+            let mut manifest = read_manifest(directory)?;
+            manifest.notes_error = None;
+            write_manifest(directory, &manifest)?;
             Ok(manifest)
         }
         Err(error) => {
+            let mut manifest = read_manifest(directory)?;
             tracing::warn!(%error, meeting = id, "could not generate meeting notes");
             manifest.notes_error = Some(error.to_string());
-            write_manifest(&directory, &manifest)?;
+            write_manifest(directory, &manifest)?;
             Err(error)
         }
     }
 }
 
-/// Parses the turns of an exported meeting Markdown file (`**You** · 01:02`
-/// followed by the turn's text).
-#[cfg(any(debug_assertions, test))]
-pub(super) fn entries_from_markdown(markdown: &str) -> Vec<TranscriptEntry> {
-    let mut entries: Vec<TranscriptEntry> = Vec::new();
-    let mut in_turn = false;
-    for line in markdown.lines() {
-        let header = line
-            .strip_prefix("**")
-            .and_then(|rest| rest.split_once("** · "))
-            .and_then(|(label, clock)| {
-                let source = match label {
-                    "You" => super::MeetingSource::Microphone,
-                    "Them" => super::MeetingSource::System,
-                    _ => return None,
-                };
-                let (minutes, seconds) = clock.trim().split_once(':')?;
-                let start_ms =
-                    (minutes.parse::<u64>().ok()? * 60 + seconds.parse::<u64>().ok()?) * 1_000;
-                Some((source, start_ms))
-            });
-        if let Some((source, start_ms)) = header {
-            entries.push(TranscriptEntry {
-                source,
-                start_ms,
-                end_ms: start_ms,
-                text: String::new(),
-            });
-            in_turn = true;
-        } else if line.starts_with('#') || line.starts_with(NOTES_START) {
-            in_turn = false;
-        } else if in_turn
-            && !line.trim().is_empty()
-            && let Some(entry) = entries.last_mut()
-        {
-            if !entry.text.is_empty() {
-                entry.text.push(' ');
-            }
-            entry.text.push_str(line.trim());
+/// Publish notes and export metadata while retaining the generation claim.
+pub(super) fn publish_notes(
+    directory: &Path,
+    claim: InProgress,
+    notes: MeetingNotes,
+    descriptive_filenames: bool,
+    separate_notes: bool,
+) -> Result<MeetingManifest> {
+    let (manifest, ()) = super::write::MeetingWrite::claimed(directory, claim).update(|manifest| {
+        let previous_title = display_title(manifest);
+        manifest.notes = Some(notes);
+        manifest.notes_error = None;
+        let title = display_title(manifest);
+        if let Err(error) = apply_notes_to_export(
+            manifest, &previous_title, &title, descriptive_filenames, separate_notes,
+        ) {
+            tracing::warn!(%error, meeting = manifest.id, "could not add notes to meeting Markdown");
+            manifest.notes_error = Some(format!("Notes not added to Markdown: {error}"));
         }
-    }
-    entries.retain(|entry| !entry.text.is_empty());
-    // Markdown has start times only: a turn lasts until the next one, or
-    // about 150 words a minute for the last.
-    let starts = entries
-        .iter()
-        .skip(1)
-        .map(|entry| entry.start_ms)
-        .collect::<Vec<_>>();
-    for (index, entry) in entries.iter_mut().enumerate() {
-        let spoken = entry.start_ms + entry.text.split_whitespace().count() as u64 * 400;
-        entry.end_ms = starts
-            .get(index)
-            .map_or(spoken, |next| (*next).max(entry.start_ms));
-    }
-    entries
+        Ok(())
+    })?;
+    Ok(manifest)
 }
 
 /// Runs the real model on a transcript file without recording anything:
@@ -1013,7 +1031,7 @@ pub fn summarize_file(path: &Path, excerpt_chars: Option<usize>) -> Result<Strin
     generator::available().map_err(|reason| eyre!("{reason}"))?;
     let text =
         fs::read_to_string(path).wrap_err_with(|| format!("could not read {}", path.display()))?;
-    let entries = entries_from_markdown(&text);
+    let entries = super::markdown::entries_from_markdown(&text);
     let context = generator::context_tokens();
     let mut report = String::new();
 
@@ -1043,12 +1061,18 @@ pub fn summarize_file(path: &Path, excerpt_chars: Option<usize>) -> Result<Strin
 
     let max_chars = excerpt_chars.unwrap_or_else(|| excerpt_budget(context, FINAL_EXCERPT_CHARS));
     let started = Instant::now();
-    let summary = summarize_entries(
+    let summary = match summarize_entries(
         &entries,
         max_chars,
         started + TOTAL_DEADLINE,
         generator::generate_notes,
-    )?;
+    )? {
+        Some(summary) => summary,
+        None => {
+            report.push_str("\nthe transcript has no speech to summarize\n");
+            return Ok(report);
+        }
+    };
     let elapsed = started.elapsed();
     let calls = summary.calls;
     let notes = MeetingNotes::from_summary(summary, elapsed);
@@ -1089,12 +1113,7 @@ mod tests {
     use crate::meeting::MeetingSource;
 
     fn entry(source: MeetingSource, start_ms: u64, text: &str) -> TranscriptEntry {
-        TranscriptEntry {
-            source,
-            start_ms,
-            end_ms: start_ms + 1_000,
-            text: text.into(),
-        }
+        TranscriptEntry::new(source, start_ms, start_ms + 1_000, text)
     }
 
     fn conversation(turns: usize) -> Vec<TranscriptEntry> {
@@ -1150,6 +1169,7 @@ mod tests {
                 ))
             },
         )
+        .unwrap()
         .unwrap();
         assert_eq!(summary.calls, 1);
         assert_eq!(prompts[0].0, NOTES_INSTRUCTIONS);
@@ -1198,6 +1218,7 @@ mod tests {
         let mut prompts = Vec::new();
         summarize_with_calendar(
             &conversation(2),
+            Labels::default(),
             Some(&calendar),
             &[],
             FINAL_EXCERPT_CHARS,
@@ -1207,6 +1228,7 @@ mod tests {
                 Ok(generated("Launch", "They met."))
             },
         )
+        .unwrap()
         .unwrap();
         assert!(prompts[0].starts_with(
             "Calendar event: Q4 launch sync\nAttendees: Ana Ruiz, Ben Ito\n\nMeeting transcript:\n\n[00:00] You: Turn 0"
@@ -1223,6 +1245,7 @@ mod tests {
         let mut prompts = Vec::new();
         summarize_with_calendar(
             &conversation(2),
+            Labels::default(),
             Some(&calendar),
             &terms,
             FINAL_EXCERPT_CHARS,
@@ -1232,6 +1255,7 @@ mod tests {
                 Ok(generated("Launch", "They met."))
             },
         )
+        .unwrap()
         .unwrap();
         assert!(prompts[0].starts_with(
             "Names and terms that may appear: Kubernetes, Ana Ruiz\n\nCalendar event: Q4 launch sync\nAttendees: Ana Ruiz\n\nMeeting transcript:\n\n[00:00] You: Turn 0"
@@ -1241,6 +1265,7 @@ mod tests {
         let mut without = Vec::new();
         summarize_with_calendar(
             &conversation(2),
+            Labels::default(),
             None,
             &[],
             FINAL_EXCERPT_CHARS,
@@ -1250,6 +1275,7 @@ mod tests {
                 Ok(generated("Launch", "They met."))
             },
         )
+        .unwrap()
         .unwrap();
         assert!(without[0].starts_with("Meeting transcript:\n\n[00:00] You: Turn 0"));
 
@@ -1261,12 +1287,14 @@ mod tests {
         for terms in [&[][..], &terms[..]] {
             let summary = summarize_with_calendar(
                 &entries,
+                Labels::default(),
                 None,
                 terms,
                 budget,
                 Instant::now() + Duration::from_secs(60),
                 |_, _, _| Ok(generated("Launch", "They met.")),
             )
+            .unwrap()
             .unwrap();
             excerpts.push(summary.excerpt_chars);
         }
@@ -1277,7 +1305,7 @@ mod tests {
     #[test]
     fn long_meetings_are_excerpted_from_the_opening_middle_and_ending() {
         let entries = conversation(400);
-        let excerpt = excerpt(&entries, 12_000);
+        let excerpt = excerpt(&entries, Labels::default(), 12_000);
         assert!(excerpt.text.len() < excerpt.transcript_chars);
         assert!(excerpt.text.len() <= 12_000, "{}", excerpt.text.len());
         let lines = excerpt.text.lines().collect::<Vec<_>>();
@@ -1298,7 +1326,7 @@ mod tests {
         assert!(turns.iter().any(|turn| (200..300).contains(turn)));
         assert!(lines.iter().filter(|line| **line == GAP_MARKER).count() >= 3);
 
-        let whole = super::excerpt(&entries[..3], 4_000);
+        let whole = super::excerpt(&entries[..3], Labels::default(), 4_000);
         assert_eq!(whole.text.len(), whole.transcript_chars);
         assert_eq!(whole.text.lines().count(), 3);
     }
@@ -1309,7 +1337,7 @@ mod tests {
             entry(MeetingSource::Microphone, 0, "Hello there."),
             entry(MeetingSource::System, 5_000, &"word ".repeat(400)),
         ];
-        let lines = transcript_lines(&entries);
+        let lines = transcript_lines(&entries, Labels::default());
         assert_eq!(lines[0], "[00:00] You: Hello there.");
         assert!(lines.len() > 2);
         assert!(lines.iter().all(|line| line.len() <= LINE_CHARS));
@@ -1342,6 +1370,7 @@ mod tests {
                 }
             },
         )
+        .unwrap()
         .unwrap();
         assert_eq!(summary.calls, 2);
         assert!(sizes[1] < sizes[0] * 2 / 3, "{sizes:?}");
@@ -1380,7 +1409,55 @@ mod tests {
         .unwrap();
         assert!(!called);
         assert!(error.to_string().contains("in time"));
-        assert!(summarize_entries(&[], 8_000, Instant::now(), |_, _, _| unreachable!()).is_err());
+
+        // No speech is nothing to summarize, not a notes failure: the writer
+        // is never called and no summary comes back.
+        let mut summarized = false;
+        assert!(
+            summarize_entries(&[], 8_000, Instant::now(), |_, _, _| {
+                summarized = true;
+                Ok(GeneratedNotes::default())
+            })
+            .unwrap()
+            .is_none()
+        );
+        assert!(!summarized);
+    }
+
+    #[test]
+    fn a_transcript_with_no_speech_clears_notes_error_without_asking_the_writer() {
+        let id = format!("notes-empty-{}-{}", std::process::id(), now_ms());
+        let directory = std::env::temp_dir().join(&id);
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let mut manifest: MeetingManifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "id": id,
+            "title": "Design sync",
+            "status": "complete",
+            "created_at_ms": 1_760_000_000_000_u64,
+            "ended_at_ms": 1_760_000_060_000_u64,
+            "duration_ms": 60_000,
+            "system": {"file": "system.wav", "samples": 0, "dropped_packets": 0},
+            "microphone": {"file": "microphone.wav", "samples": 0, "dropped_packets": 0},
+            "error": null
+        }))
+        .unwrap();
+        manifest.notes_error = Some("the transcript has no speech to summarize".into());
+        write_manifest(&directory, &manifest).unwrap();
+        fs::write(directory.join("transcript.ndjson"), "").unwrap();
+
+        let claim = InProgress::claim(&manifest.id).unwrap();
+        let saved = summarize_with(&directory, &manifest.id, claim, |_, _, _| {
+            unreachable!("a transcript with no speech never asks the writer")
+        })
+        .unwrap();
+        assert!(saved.notes.is_none());
+        assert_eq!(saved.notes_error, None);
+        let stored = read_manifest(&directory).unwrap();
+        assert!(stored.notes.is_none());
+        assert_eq!(stored.notes_error, None);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1613,30 +1690,6 @@ mod tests {
             "# Launch review\n\nText\n# Zoom call — 2:30 PM\n"
         );
         assert_eq!(apply_title(markdown, "Other", "Launch review"), markdown);
-    }
-
-    #[test]
-    fn exported_markdown_parses_back_into_turns() {
-        let block = render_notes_block(&meeting_notes());
-        let markdown = apply_notes(EXPORT, "Zoom call — 2:30 PM", "Launch", &block);
-        let entries = entries_from_markdown(&markdown);
-        assert_eq!(
-            entries,
-            [
-                TranscriptEntry {
-                    source: MeetingSource::Microphone,
-                    start_ms: 1_000,
-                    end_ms: 4_000,
-                    text: "Hi.".into()
-                },
-                TranscriptEntry {
-                    source: MeetingSource::System,
-                    start_ms: 4_000,
-                    end_ms: 4_400,
-                    text: "Hello.".into()
-                },
-            ]
-        );
     }
 
     #[test]

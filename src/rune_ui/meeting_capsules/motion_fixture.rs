@@ -33,13 +33,7 @@ fn recording_motion_frames() {
         std::fs::create_dir_all(&dir).unwrap();
         let (mut rt, _, _) = runtime(live_recording("fixture"), false, dark, RECORDING);
         rt.transparent = true;
-        rt.update(|c, _| {
-            c.live.entries = call();
-            c.live.pending = meeting::PendingDelta {
-                turns: 2,
-                span_ms: 64_000,
-            };
-        });
+        rt.update(|c, _| c.live.entries = call());
         landed(&mut rt);
         let mut renderer = offscreen::renderer(&gpu.device);
         let target = offscreen::target(&gpu.device, w, h);
@@ -62,7 +56,7 @@ fn recording_motion_frames() {
         let mut trace = String::from("frame,hovered,key,x,y,w,h\n");
         for frame in 0..366 {
             // Put the fixture on the same second at each event, independent of GPU speed.
-            if let Some(Kind::Recording(shown)) = &mut rt.state.kind {
+            if let State::Recording { recording: shown, .. } = &mut rt.state.state {
                 shown.started = Instant::now() - Duration::from_secs(258 + frame as u64 / 60);
             }
             if frame % 60 == 0 {
@@ -88,11 +82,11 @@ fn recording_motion_frames() {
             }
             rt.frame(1.0 / 60.0);
             for elem in rt.elements() {
-                if let Some(key @ ("pill" | "elapsed" | "copy-new" | "meeting-listening-field")) =
+                if let Some(key @ ("pill" | "elapsed" | "copy-prompt" | "meeting-listening-field")) =
                     elem.key.as_deref()
                 {
                     let [x, y, w, h] = elem.rect;
-                    writeln!(trace, "{frame},{},{key},{x},{y},{w},{h}", rt.state.hovered).unwrap();
+                    writeln!(trace, "{frame},{},{key},{x},{y},{w},{h}", rt.state.hovered()).unwrap();
                 }
             }
             {
@@ -171,7 +165,7 @@ fn a_light_host_draws_the_dark_recording_from_the_first_frame() {
 /// recolour.
 fn hold_clock(rt: &mut Runtime<Capsule>) {
     rt.update(|capsule, tx| {
-        if let Some(Kind::Recording(shown)) = &mut capsule.kind {
+        if let State::Recording { recording: shown, .. } = &mut capsule.state {
             shown.started = Instant::now() - Duration::from_secs(258);
         }
         tx.instant();
@@ -219,11 +213,12 @@ fn the_timer_and_saved_corner_hold_through_a_hover_reversal() {
                     "{corner:?} timer at {i}"
                 );
             } else {
-                // In a left corner the time rides the wall, 14 pt inside it.
-                let [px, _, pw, _] = laid_out(&rt, "pill");
+                // In a left corner the time rides the wall, 14 pt inside it
+                // and beyond the ✕'s room as the panel opens.
+                let [px, _, pw, ph] = laid_out(&rt, "pill");
                 let [tx, _, tw, _] = laid_out(&rt, "elapsed");
                 assert!(
-                    (px + pw - REST_PX - (tx + tw)).abs() < 0.03
+                    (px + pw - REST_PX - discard_room_at(pw, ph, 0.) - (tx + tw)).abs() < 0.03
                         && x > timer.0 - 0.02
                         && (y - timer.1).abs() < 0.02,
                     "{corner:?} timer at {i}"
@@ -272,7 +267,7 @@ fn stop_hits_its_center_edges_and_corners_but_not_its_neighbors() {
         open_recording(&mut rt);
         let ([x, y, w, h], _) = rt.presented("stop").unwrap();
         assert!(w >= 44. && h >= 44., "{corner:?}: {w}×{h}");
-        let ([_, cy, _, ch], _) = rt.presented("copy-new").unwrap();
+        let ([_, cy, _, ch], _) = rt.presented("copy-prompt").unwrap();
         assert!(y + h <= cy || y >= cy + ch);
         let click = |rt: &mut Runtime<Capsule>, px, py| {
             rt.pointer_down(px, py);
@@ -299,8 +294,13 @@ fn stop_hits_its_center_edges_and_corners_but_not_its_neighbors() {
                 assert!(commands.try_recv().is_err());
                 assert!(rt.find("elapsed").is_some());
                 rt.update(|c, tx| {
-                    c.stopping = false;
-                    c.hovered = true;
+                    if let State::Recording {
+                        hovered, stopping, ..
+                    } = &mut c.state
+                    {
+                        *stopping = false;
+                        *hovered = true;
+                    }
                     tx.instant();
                 });
                 rt.frame(0.);
@@ -340,8 +340,10 @@ fn stop_is_one_named_action_for_keyboard_and_accessibility() {
     }
 }
 
+// Every enabled row is a button under the pointer, the band drags with the
+// grab hand, and a row with nothing to do keeps the arrow.
 #[test]
-fn localized_action_rows_share_their_geometry_and_arrow_in_every_corner() {
+fn localized_action_rows_share_their_geometry_and_pointer_in_every_corner() {
     use crate::desktop::i18n;
     use MeetingIndicatorCorner::*;
     for &(code, _) in i18n::LANGUAGE_CHOICES.iter().filter(|(c, _)| c.is_some()) {
@@ -351,7 +353,6 @@ fn localized_action_rows_share_their_geometry_and_arrow_in_every_corner() {
             rt.update(move |c, tx| {
                 c.corner = corner;
                 c.live.entries = call();
-                c.copy_new = Some(Arc::new(|_| {}));
                 tx.instant()
             });
             rt.frame(0.);
@@ -361,9 +362,8 @@ fn localized_action_rows_share_their_geometry_and_arrow_in_every_corner() {
             open_recording(&mut rt);
             for (key, name) in [
                 ("stop", "Stop"),
-                ("copy-new", "Copy new"),
-                ("copy-all", "Copy all"),
                 ("copy-prompt", "Copy agent prompt"),
+                ("copy-all", "Copy transcript"),
             ] {
                 let nodes = rt.elements();
                 let (idx, row) = nodes
@@ -374,7 +374,7 @@ fn localized_action_rows_share_their_geometry_and_arrow_in_every_corner() {
                 let [x, y, w, h] = row.rect;
                 assert_eq!(
                     (x, w, h),
-                    (CAPSULE_INSET + PANEL_PAD, 242., 44.),
+                    (CAPSULE_INSET + PANEL_PAD, PANEL_WIDTH - 2. * PANEL_PAD, ROW_HEIGHT),
                     "{code:?} {corner:?} {key}"
                 );
                 let child = |key| {
@@ -384,17 +384,17 @@ fn localized_action_rows_share_their_geometry_and_arrow_in_every_corner() {
                         .unwrap()
                 };
                 let [gx, gy, gw, gh] = child("glyph").rect;
-                assert_eq!((gx - x, gw, gh), (9., 16., 16.));
+                assert_eq!((gx - x, gw, gh), (ROW_PX, CAPSULE.icon, CAPSULE.icon));
                 assert_eq!(gy + gh / 2., y + h / 2.);
                 let label = child("label");
                 assert_eq!(label.text.as_deref(), Some(tr(name)));
-                assert_eq!(label.rect[0] - x, 33.);
+                assert_eq!(label.rect[0] - x, ROW_PX + CAPSULE.icon + CAPSULE.icon_gap);
                 for px in [gx + gw / 2., label.rect[0] + 1., x + w - 1.] {
                     rt.pointer_move(px, y + h / 2.);
                     rt.frame(1. / 60.);
                     assert_eq!(
                         rt.cursor(),
-                        Cursor::Default,
+                        Cursor::Pointer,
                         "{code:?} {corner:?} {key} {px}"
                     );
                     assert!(
@@ -410,12 +410,51 @@ fn localized_action_rows_share_their_geometry_and_arrow_in_every_corner() {
 }
 
 #[test]
+fn the_meter_band_grabs_and_a_row_with_nothing_to_do_keeps_the_arrow() {
+    let (mut rt, _, _) = runtime(live_recording("cursors"), false, true, RECORDING);
+    rt.frame(0.);
+    // At rest the band is the whole pill, and dragging it moves the capsule.
+    let (x, y) = rt.find("pill").unwrap();
+    rt.pointer_move(x, y);
+    rt.frame(1. / 60.);
+    assert_eq!(rt.cursor(), Cursor::Grab);
+    open_recording(&mut rt);
+    let [x, y, w, h] = laid_out(&rt, "meta");
+    rt.pointer_move(x + w / 2., y + h / 2.);
+    rt.frame(1. / 60.);
+    assert_eq!(rt.cursor(), Cursor::Grab);
+    // Copy all has no transcript yet, so it keeps the arrow.
+    let (x, y) = rt.find("copy-all").unwrap();
+    rt.pointer_move(x, y);
+    rt.frame(1. / 60.);
+    assert_eq!(rt.cursor(), Cursor::Default, "copy-all");
+    // Copy agent prompt always works, and so does Stop.
+    for key in ["copy-prompt", "stop"] {
+        let (x, y) = rt.find(key).unwrap();
+        rt.pointer_move(x, y);
+        rt.frame(1. / 60.);
+        assert_eq!(rt.cursor(), Cursor::Pointer, "{key}");
+    }
+    // The finished meeting's ✕ is a button too, in the band that drags.
+    rt.update(|c, _| {
+        let Kind::Ready(m) = ready_transcript() else {
+            unreachable!()
+        };
+        c.published(m);
+    });
+    landed(&mut rt);
+    let (x, y) = rt.find("dismiss").unwrap();
+    rt.pointer_move(x, y);
+    rt.frame(1. / 60.);
+    assert_eq!(rt.cursor(), Cursor::Pointer, "dismiss");
+}
+
+#[test]
 fn row_swipes_do_not_move_the_panel_or_fire_actions_but_small_clicks_work() {
     let (mut rt, commands, _) = runtime(live_recording("ready-snap"), false, true, RECORDING);
     let (send, shifts) = mpsc::channel();
     rt.update(move |c, _| {
         c.live.entries = call();
-        c.copy_new = Some(Arc::new(|_| {}));
         c.shift = Some(Arc::new(move |_, dx, dy| send.send((dx, dy)).unwrap()));
     });
     rt.frame(0.);
@@ -441,7 +480,7 @@ fn row_swipes_do_not_move_the_panel_or_fire_actions_but_small_clicks_work() {
             tx.instant()
         });
         rt.frame(0.);
-        for key in ["stop", "copy-new", "copy-all", "copy-prompt"] {
+        for key in ["stop", "copy-prompt", "copy-all"] {
             let Some(([x, y, w, h], _)) = rt.presented(key) else {
                 continue;
             };
@@ -449,7 +488,21 @@ fn row_swipes_do_not_move_the_panel_or_fire_actions_but_small_clicks_work() {
                 let py = y + h / 2.;
                 rt.pointer_move(px, py);
                 rt.frame(0.);
-                assert_eq!(rt.cursor(), Cursor::Default);
+                // An enabled row is a button; a disabled one is not a target
+                // and falls through to the panel's arrow.
+                let focusable = rt
+                    .elements()
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some(key) && e.focusable);
+                assert_eq!(
+                    rt.cursor(),
+                    if focusable {
+                        Cursor::Pointer
+                    } else {
+                        Cursor::Default
+                    },
+                    "{key} {phase}"
+                );
                 rt.pointer_down(px, py);
                 rt.pointer_move(px + 10., py);
                 rt.frame(0.);
@@ -460,7 +513,7 @@ fn row_swipes_do_not_move_the_panel_or_fire_actions_but_small_clicks_work() {
                     "{key} {phase}"
                 );
                 assert!(
-                    rt.state.live.copied.is_none() && !rt.state.live.copying,
+                    rt.state.live.copied.is_none(),
                     "{key} {phase}"
                 );
             }
@@ -485,19 +538,28 @@ fn row_swipes_do_not_move_the_panel_or_fire_actions_but_small_clicks_work() {
         }
     }
     tap(&mut rt, "dismiss");
-    assert!(rt.state.kind.is_none() && commands.try_recv().is_err());
+    assert!(!rt.state.is_shown() && commands.try_recv().is_err());
 }
 
 #[test]
 fn tab_focus_tracks_the_whole_action_row_without_changing_its_bounds() {
     let (mut rt, commands, _) = runtime(live_recording("tab-rows"), false, true, RECORDING);
-    rt.update(|c, _| {
-        c.live.entries = call();
-        c.copy_new = Some(Arc::new(|_| {}));
-    });
+    rt.update(|c, _| c.live.entries = call());
     rt.frame(0.);
     open_recording(&mut rt);
-    for key in ["stop", "copy-new", "copy-all", "copy-prompt"] {
+    // The header's ✕ comes first, in its own 28 pt box.
+    rt.key(rune::KeyEvent {
+        key: rune::Key::Tab,
+        mods: Default::default(),
+    });
+    rt.frame(0.);
+    let focused = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.focus_visible && e.focused)
+        .unwrap();
+    assert_eq!(focused.key.as_deref(), Some("discard"));
+    for key in ["stop", "copy-prompt", "copy-all"] {
         rt.key(rune::KeyEvent {
             key: rune::Key::Tab,
             mods: Default::default(),
@@ -509,7 +571,7 @@ fn tab_focus_tracks_the_whole_action_row_without_changing_its_bounds() {
             .find(|e| e.focus_visible && e.focused)
             .unwrap();
         assert_eq!(focused.key.as_deref(), Some(key));
-        assert_eq!(focused.rect[2..], [242., 44.]);
+        assert_eq!(focused.rect[2..], [PANEL_WIDTH - 2. * PANEL_PAD, ROW_HEIGHT]);
     }
     assert!(commands.try_recv().is_err());
 }
@@ -579,6 +641,9 @@ fn capture_end_and_publication_retarget_one_anchored_surface() {
 
 /// Measure what Rune presented, not just Taffy's destination. In particular,
 /// a transient but perfectly anchored 18 pt dip used to pass the anchor test.
+/// The finished meeting is its own layout (a title link over the copies), so
+/// the clock and rows hold until it is published, and from the summary on
+/// the panel only grows. Only the recording's foot leaves when capture ends.
 #[test]
 fn notes_grow_past_the_copies_without_a_height_dip_or_a_clock_hop() {
     use MeetingIndicatorCorner::*;
@@ -599,9 +664,10 @@ fn notes_grow_past_the_copies_without_a_height_dip_or_a_clock_hop() {
             open_recording(&mut rt);
             let rect = |rt: &Runtime<Capsule>, k| rt.presented(k).unwrap().0;
             let clock = rect(&rt, "elapsed");
-            let rows = ["copy-new", "copy-all", "copy-prompt"];
+            let rows = ["copy-prompt", "copy-all"];
             let at = rows.map(|k| rect(&rt, k));
             let mut height = rect(&rt, "pill")[3];
+            let mut retracted = false;
             let mut title_width = None;
             rt.update(|c, _| c.mark_stopping());
             for frame in 0..delay + 100 {
@@ -625,20 +691,34 @@ fn notes_grow_past_the_copies_without_a_height_dip_or_a_clock_hop() {
                     });
                 }
                 rt.frame(1. / 60.);
+                let published = frame > delay;
+                let summarized = frame > 4 + delay;
                 let now = rect(&rt, "pill")[3];
-                assert!(
-                    now >= height - 0.02,
-                    "{corner:?} f{frame}: {height} → {now}"
-                );
+                // Capture ending takes the recording's foot with it, once: until
+                // the panel has been down to the one the finished meeting grows
+                // from it may fall that far, no further. From there it never dips.
+                let base = panel::open_height_without_notice();
+                retracted |= now <= base + 0.02;
+                let floor = if retracted { height } else { height.min(base) };
+                if !published || summarized {
+                    assert!(
+                        now >= floor - 0.02,
+                        "{corner:?} f{frame}: {height} → {now}"
+                    );
+                }
                 height = now;
-                let t = rect(&rt, "elapsed");
-                assert!(
-                    (t[1] - clock[1]).abs() < 0.02 && t[2..] == clock[2..],
-                    "{corner:?} f{frame} timer {t:?} / {clock:?}"
-                );
-                assert!((t[0] - clock[0]).abs() < 0.02, "timer moved at {frame}");
+                if !published {
+                    let t = rect(&rt, "elapsed");
+                    assert!(
+                        (t[1] - clock[1]).abs() < 0.02 && t[2..] == clock[2..],
+                        "{corner:?} f{frame} timer {t:?} / {clock:?}"
+                    );
+                    assert!((t[0] - clock[0]).abs() < 0.02, "timer moved at {frame}");
+                }
                 if frame > delay {
-                    let w = rect(&rt, "title")[2];
+                    // The title hugs its words; the link it is cut to fit
+                    // is the width that must hold still.
+                    let w = rect(&rt, "open-meeting")[2];
                     assert!(
                         (w - *title_width.get_or_insert(w)).abs() < 0.02,
                         "title wrapped at a moving width"
@@ -647,7 +727,7 @@ fn notes_grow_past_the_copies_without_a_height_dip_or_a_clock_hop() {
                 for (key, original) in rows.into_iter().zip(at) {
                     let row = rect(&rt, key);
                     assert_eq!(row[2..], original[2..]);
-                    if !long {
+                    if !long && !published {
                         assert!(
                             (row[1] - original[1]).abs() < 0.02,
                             "{corner:?} f{frame} {key}: {row:?} / {original:?}"
@@ -655,12 +735,8 @@ fn notes_grow_past_the_copies_without_a_height_dip_or_a_clock_hop() {
                     }
                 }
             }
-            let header = rect(&rt, "header")[3];
-            assert!(if long {
-                header > OPEN_HEADER
-            } else {
-                (header - OPEN_HEADER).abs() < 0.02
-            });
+            // The finished panel: its title band, the summary, the copies.
+            assert!(rt.find("open-meeting").is_some() && rt.find("summary").is_some());
         }
     }
 }
@@ -677,7 +753,7 @@ fn a_long_recording_keeps_its_timer_and_stop_inside_each_corner() {
             let (mut rt, received, _) = runtime(live_recording("fixture"), false, true, RECORDING);
             rt.update(move |c, tx| {
                 c.corner = corner;
-                if let Some(Kind::Recording(shown)) = &mut c.kind {
+                if let State::Recording { recording: shown, .. } = &mut c.state {
                     shown.started = Instant::now() - Duration::from_secs(sec);
                     shown.warning = warning.then_some(meeting::TrackWarning::DigitalSilence);
                 }
@@ -706,7 +782,10 @@ fn a_long_recording_keeps_its_timer_and_stop_inside_each_corner() {
                 let [px, _, pw, _] = laid_out(&rt, "pill");
                 let [tx, _, tw, _] = laid_out(&rt, "elapsed");
                 let inset = px + pw - (tx + tw);
-                assert!((inset - REST_PX).abs() < 0.25, "{corner:?}: {inset}");
+                assert!(
+                    (inset - REST_PX - panel::DISCARD_ROOM).abs() < 0.25,
+                    "{corner:?}: {inset}"
+                );
             }
             let [_, y, w, h] = laid_out(&rt, "stop");
             let [_, my, _, mh] = laid_out(&rt, "meta");

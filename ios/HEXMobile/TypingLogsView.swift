@@ -14,7 +14,7 @@ struct TypingLogsView: View {
             List {
                 Section {
                     if days.isEmpty {
-                        Text("Type with Hex's keyboard and each day's log shows up here.")
+                        Text("No logs yet")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(days) { day in
@@ -22,7 +22,7 @@ struct TypingLogsView: View {
                             .task(id: countKey(day)) { await count(day) }
                     }
                 } footer: {
-                    Text("One file per day, kept 14 days, one event per line. Password, code and card fields are never logged.")
+                    Text("One file per day, kept for 14 days. Password, code and card fields are never logged.")
                 }
 
                 if !days.isEmpty {
@@ -52,7 +52,7 @@ struct TypingLogsView: View {
                     reload()
                 }
             } message: {
-                Text("Every day's log is removed from this iPhone.")
+                Text("All logs are deleted from this iPhone.")
             }
             .refreshable { reload() }
         }
@@ -82,15 +82,17 @@ struct TypingLogsView: View {
 
     private func title(_ day: TypingLogDay) -> String {
         guard let date = day.date else { return day.day }
-        if Calendar.current.isDateInToday(date) { return "Today" }
-        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
+        if Calendar.current.isDateInToday(date) { return String(localized: "Today") }
+        if Calendar.current.isDateInYesterday(date) { return String(localized: "Yesterday") }
         return date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
     }
 
     private func detail(_ day: TypingLogDay) -> String {
         let size = ByteCountFormatter.string(fromByteCount: Int64(day.bytes), countStyle: .file)
         guard let count = counts[countKey(day)] else { return size }
-        return "\(size) · \(count.formatted()) " + (count == 1 ? "event" : "events")
+        return count == 1
+            ? String(localized: "\(size) · 1 event")
+            : String(localized: "\(size) · \(count.formatted()) events")
     }
 
     private func countKey(_ day: TypingLogDay) -> String {
@@ -114,7 +116,8 @@ struct TypingLogsView: View {
 /// The system share sheet for files, over whatever is showing.
 @MainActor
 enum ShareSheet {
-    static func present(_ urls: [URL]) {
+    /// `completion` runs once the sheet closes, shared or not.
+    static func present(_ urls: [URL], completion: ((Bool) -> Void)? = nil) {
         guard !urls.isEmpty else { return }
         let scene = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
@@ -124,13 +127,16 @@ enum ShareSheet {
             top = presented
         }
         let controller = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        if let completion {
+            controller.completionWithItemsHandler = { _, completed, _, _ in completion(completed) }
+        }
         controller.popoverPresentationController?.sourceView = top.view
         controller.popoverPresentationController?.sourceRect = CGRect(x: top.view.bounds.midX, y: 60, width: 1, height: 1)
         top.present(controller, animated: true)
     }
 }
 
-/// `--snap-state experiments` (the Experiments card) and `--snap-state typing-logs`
+/// `--snap-state experiments` (Settings › Labs) and `--snap-state typing-logs`
 /// (the Typing logs screen) on Simulator; pass `--experiment-typing-logs` to show it on.
 struct ExperimentsSnapshotStage: View {
     let scene: String
@@ -146,14 +152,10 @@ struct ExperimentsSnapshotStage: View {
         if scene == "typing-logs" {
             TypingLogsView()
         } else {
-            ScrollView {
-                ExperimentsCard()
-                    .frame(maxWidth: 500)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 14)
-                    .frame(maxWidth: .infinity)
+            NavigationStack {
+                ExperimentsSettingsPage()
             }
-            .background(HexTheme.bgDeep.ignoresSafeArea())
+            .tint(HexTheme.textBase)
             .preferredColorScheme(.dark)
         }
     }

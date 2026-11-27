@@ -5,26 +5,6 @@ use crate::audio::CaptureInstant;
 use crate::control::ControlReply;
 use crate::dictation::audio::DictationAudio;
 
-/// Whether Hex takes Escape from the app in front: for a capture (drawing,
-/// its press, the capsule's picker) and a held dictation it cancels, never a
-/// hands-free one, and never while a programmatic dictation records: the
-/// listener ignores every key then, so Escape stays with its owner app
-/// rather than being swallowed.
-pub(super) fn claims_escape(
-    programmatic: bool,
-    capture_escape: bool,
-    held_dictation: bool,
-) -> bool {
-    !programmatic && (capture_escape || held_dictation)
-}
-
-/// Whether a Caps Lock press may act. An Annotate capture records the
-/// narration itself, so a Caps Lock press must not start a dictation over it;
-/// a press that finishes an already-running Caps Lock capture still works.
-pub(super) fn caps_lock_can_press(caps_recording: bool, annotate_recording: bool) -> bool {
-    caps_recording || !annotate_recording
-}
-
 /// Why a control can't start a capture now, if it can't.
 pub(super) fn capture_refusal(other_recording: bool, suspended: bool) -> Option<ControlReply> {
     if other_recording {
@@ -52,6 +32,20 @@ pub(super) fn paste_last_refusal(capture_active: bool) -> Option<ControlReply> {
             "a recording or shortcut is in progress; finish it first",
         )
     })
+}
+
+/// Whether Paste Last's picker stands down (closing one that is open):
+/// shortcuts are suspended, a programmatic dictation holds the keys, or a
+/// shortcut dictation records. An Annotate capture or a meeting recording
+/// never does: neither owns the paste target, so a tap or a hold works
+/// over either and neither stops.
+#[cfg(hex_capture)]
+pub(super) fn paste_picker_paused(
+    shortcuts_suspended: bool,
+    programmatic: bool,
+    dictation_recording: bool,
+) -> bool {
+    shortcuts_suspended || programmatic || dictation_recording
 }
 
 /// The instant a shortcut edge applies to. A capture pressed while the

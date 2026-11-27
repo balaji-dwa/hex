@@ -58,12 +58,39 @@ fn texts(rt: &Runtime<Ui>) -> Vec<String> {
         .collect()
 }
 
+/// The text under element `root` in the accessibility tree, in order,
+/// without the recorder's invisible sizing faces.
+fn texts_under(rt: &Runtime<Ui>, root: &str) -> Vec<String> {
+    rt.elements()
+        .into_iter()
+        .filter(|e| e.path.contains(root) && !e.path.contains("/faces/size"))
+        .filter_map(|e| e.text)
+        .collect()
+}
+
 /// Presses an element by key and lets every animation settle.
 fn tap(rt: &mut Runtime<Ui>, key: &str) {
     let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}"));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     settle(rt);
+}
+
+/// Wheels a scrolling body until `key` sits inside it, for a page taller
+/// than the window.
+fn scroll_into_view(rt: &mut Runtime<Ui>, key: &str, viewport: &str) {
+    for _ in 0..400 {
+        let view = element(rt, viewport).rect;
+        let target = element(rt, key).rect;
+        if target[1] >= view[1] && target[1] + target[3] <= view[1] + view[3] {
+            return;
+        }
+        // A positive delta moves the content down.
+        let dy = if target[1] < view[1] { 20.0 } else { -20.0 };
+        rt.wheel(view[0] + view[2] / 2.0, view[1] + view[3] / 2.0, dy);
+        rt.frame(1.0 / 60.0);
+    }
+    panic!("{key} never scrolled into {viewport}");
 }
 
 /// Opens Labs with every group unfolded, so each card is on screen.
@@ -876,6 +903,42 @@ fn the_modes_editor_lab_brings_modes_back_to_the_sidebar() {
     assert!(rt.find("nav-modes").is_none());
 }
 
+/// Labs › Neutral voice's Modes row follows the saved switch, not the
+/// process-wide gate, and toggles the selected mode.
+#[cfg(target_os = "macos")]
+#[test]
+fn neutral_voice_shows_in_modes_only_with_its_lab_and_toggles_the_mode() {
+    let mut rt = runtime("mac-labs", true, (980.0, 2000.0));
+    crate::labs::Feature::ModesEditor.set(&mut rt.state.settings, true);
+    rt.invalidate();
+    settle(&mut rt);
+    tap(&mut rt, "nav-modes");
+    settle(&mut rt);
+    assert_eq!(rt.state.pane, Pane::Modes);
+    assert!(rt.find("neutral-voice").is_none(), "off, no row");
+
+    crate::labs::Feature::NeutralVoice.set(&mut rt.state.settings, true);
+    rt.invalidate();
+    settle(&mut rt);
+    assert!(rt.find("neutral-voice").is_some(), "on, the row shows");
+    tap(&mut rt, "neutral-voice");
+    assert!(
+        rt.state
+            .settings
+            .dictation_processing
+            .default_mode
+            .neutral_voice
+    );
+    tap(&mut rt, "neutral-voice");
+    assert!(
+        !rt.state
+            .settings
+            .dictation_processing
+            .default_mode
+            .neutral_voice
+    );
+}
+
 #[test]
 fn the_sidebar_switches_panes_and_keeps_settings() {
     let mut rt = runtime("portal", true, PANE_SIZE);
@@ -1470,7 +1533,7 @@ fn history_stats_button_opens_and_closes_the_dialog() {
     );
 
     tap(&mut rt, "history-stats-open");
-    assert!(rt.state.history.stats_open);
+    assert!(rt.state.is_modal(Modal::HistoryStats));
     assert!(rt.find("history-stats-dialog").is_some());
     assert!(texts(&rt).iter().any(|text| text == "Dictation stats"));
     // Headline tiles, the daily chart, the app bars, Output's share, and
@@ -1507,7 +1570,7 @@ fn history_stats_button_opens_and_closes_the_dialog() {
     );
     assert!(rt.find("history-stats-typing").is_some());
     tap(&mut rt, "history-stats-close");
-    assert!(!rt.state.history.stats_open);
+    assert!(!rt.state.is_modal(Modal::HistoryStats));
     assert!(rt.find("history-stats-dialog").is_none());
 
     tap(&mut rt, "history-stats-open");
@@ -1520,7 +1583,7 @@ fn history_stats_button_opens_and_closes_the_dialog() {
             ..Mods::default()
         },
     );
-    assert!(rt.state.history.stats_open);
+    assert!(rt.state.is_modal(Modal::HistoryStats));
     assert_eq!(
         rt.state.pane, pane,
         "Command-1 waits while the stats dialog is open"
@@ -1528,22 +1591,34 @@ fn history_stats_button_opens_and_closes_the_dialog() {
     rt.update(on_close);
     settle(&mut rt);
     assert!(
-        !rt.state.history.stats_open,
+        !rt.state.is_modal(Modal::HistoryStats),
         "closing the window closes the dialog"
     );
+
+    tap(&mut rt, "history-stats-open");
+    vocabulary::open(&mut rt.state);
+    assert!(
+        rt.state.is_modal(Modal::Vocabulary) && !rt.state.is_modal(Modal::HistoryStats),
+        "opening another modal replaces the stats dialog"
+    );
+    vocabulary::close(&mut rt.state);
+    settle(&mut rt);
 
     tap(&mut rt, "history-stats-open");
     rt.update(|ui, tx| show(ui, Destination::History, tx));
     settle(&mut rt);
     assert!(
-        !rt.state.history.stats_open,
+        !rt.state.is_modal(Modal::HistoryStats),
         "showing History again closes the dialog"
     );
 
     tap(&mut rt, "history-stats-open");
     key(&mut rt, Key::Escape, Mods::default());
     settle(&mut rt);
-    assert!(!rt.state.history.stats_open, "Escape closes the dialog");
+    assert!(
+        !rt.state.is_modal(Modal::HistoryStats),
+        "Escape closes the dialog"
+    );
     assert!(
         focused(&rt).ends_with("history-stats-open"),
         "focus returns to Stats: {}",
@@ -1556,7 +1631,7 @@ fn history_stats_button_opens_and_closes_the_dialog() {
     rt.invalidate();
     settle(&mut rt);
     assert!(
-        !rt.state.history.stats_open,
+        !rt.state.is_modal(Modal::HistoryStats),
         "emptying the stats closes the dialog"
     );
     assert!(rt.find("history-stats-open").is_none());
@@ -1570,7 +1645,7 @@ fn history_stats_button_opens_and_closes_the_dialog() {
     rt.invalidate();
     settle(&mut rt);
     assert!(
-        !rt.state.history.stats_open,
+        !rt.state.is_modal(Modal::HistoryStats),
         "turning the lab off closes the dialog"
     );
     assert!(rt.find("history-stats-open").is_none());
@@ -1588,7 +1663,7 @@ fn history_stats_dialog_hides_sections_with_nothing_to_show() {
     });
     rt.state.settings.labs.history_stats = true;
     crate::labs::apply(&rt.state.settings.labs);
-    rt.state.history.stats_open = true;
+    rt.state.open_modal(Modal::HistoryStats);
     rt.invalidate();
     settle(&mut rt);
     assert!(rt.find("history-stats-dialog").is_some());
@@ -1602,6 +1677,161 @@ fn history_stats_dialog_hides_sections_with_nothing_to_show() {
     }
     // With no Output changes at all, its meter still reads zero.
     assert!(rt.find("history-stats-changed").is_some());
+}
+
+/// Labs › Stats on History needs both labs and something to summarize.
+#[test]
+fn history_stats_strip_needs_both_labs_and_stats() {
+    let mut rt = runtime("history", true, PANE_SIZE);
+    rt.state.history.stats = Some(history::HistoryPane::fixture_stats());
+    rt.invalidate();
+    settle(&mut rt);
+    assert!(rt.find("history-stats-strip").is_none(), "off by default");
+
+    rt.state.settings.labs.history_stats = true;
+    rt.invalidate();
+    settle(&mut rt);
+    assert!(
+        rt.find("history-stats-strip").is_none(),
+        "Dictation stats alone shows no strip"
+    );
+
+    rt.state.settings.labs.history_stats = false;
+    rt.state.settings.labs.history_stats_strip = true;
+    rt.invalidate();
+    settle(&mut rt);
+    assert!(
+        rt.find("history-stats-strip").is_none(),
+        "the strip's own switch alone shows nothing"
+    );
+
+    rt.state.settings.labs.history_stats = true;
+    rt.state.history.stats = None;
+    rt.invalidate();
+    settle(&mut rt);
+    assert!(
+        rt.find("history-stats-strip").is_none(),
+        "with no stats there is nothing to show"
+    );
+
+    rt.state.history.stats = Some(history::HistoryPane::fixture_stats());
+    rt.invalidate();
+    settle(&mut rt);
+    assert!(
+        rt.find("history-stats-strip").is_some(),
+        "both labs on and stats present, the strip shows"
+    );
+}
+
+/// The strip and the dialog's tiles draw the same six numbers from one
+/// function, so they can't drift.
+#[test]
+fn history_stats_strip_shows_the_dialogs_six_headline_numbers() {
+    let mut rt = runtime("history", true, PANE_SIZE);
+    rt.state.history.stats = Some(history::HistoryPane::fixture_stats());
+    rt.state.settings.labs.history_stats = true;
+    rt.state.settings.labs.history_stats_strip = true;
+    rt.invalidate();
+    settle(&mut rt);
+    let strip = texts_under(&rt, "history-stats-strip/");
+    assert_eq!(strip.len(), 12, "six values and six labels: {strip:?}");
+    for value in ["1,284", "128,402", "123"] {
+        assert!(
+            strip.iter().any(|text| text == value),
+            "{value} shows: {strip:?}"
+        );
+    }
+
+    tap(&mut rt, "history-stats-open");
+    let tiles = texts_under(&rt, "tiles/");
+    assert_eq!(
+        strip, tiles,
+        "the strip and the dialog show the same six values and labels"
+    );
+}
+
+/// The strip fits the smallest window in a long-language column: its cells
+/// share the row and truncate instead of running past the pane.
+#[test]
+fn history_stats_strip_fits_the_smallest_window_in_russian() {
+    let mut rt = runtime("history-stats-strip", true, (860.0, 560.0));
+    crate::desktop::i18n::apply(Some("ru"));
+    rt.invalidate();
+    settle(&mut rt);
+    let (strip, _) = rt.presented("history-stats-strip").expect("the strip");
+    for key in [
+        "dictations",
+        "words",
+        "time-saved",
+        "wpm",
+        "streak",
+        "busiest-hour",
+    ] {
+        let (cell, _) = rt
+            .presented(&format!("strip-{key}"))
+            .unwrap_or_else(|| panic!("strip-{key} draws"));
+        assert!(
+            cell[0] >= strip[0] && cell[0] + cell[2] <= strip[0] + strip[2],
+            "strip-{key} stays inside the strip: {cell:?} in {strip:?}"
+        );
+    }
+}
+
+/// The agent card's request field fits beside its actions in the smallest
+/// window: a long translation wraps inside the card instead of running
+/// under Open file and Edit with agent.
+#[test]
+fn output_agent_card_keeps_a_long_request_beside_its_actions() {
+    let mut rt = runtime("output", true, MIN_WINDOW_SIZE);
+    // The examples cycle in a shuffled order; pin the default order so the
+    // first example shows.
+    rt.state.output.order = Default::default();
+    crate::desktop::i18n::apply(Some("hu"));
+    rt.invalidate();
+    settle(&mut rt);
+    let (actions, _) = rt.presented("actions").expect("the agent card's actions");
+    for key in ["example-title", "example-request"] {
+        let (rect, _) = rt.presented(key).unwrap_or_else(|| panic!("{key} draws"));
+        assert!(
+            rect[0] + rect[2] <= actions[0],
+            "{key} ends before the actions: {rect:?} before {actions:?}"
+        );
+    }
+    crate::desktop::i18n::apply(None);
+}
+
+/// The full Stats button and dialog stay exactly as they were with the strip
+/// on, and the strip stays behind them.
+#[test]
+fn history_stats_button_and_dialog_still_work_with_the_strip_on() {
+    let mut rt = runtime("history", true, PANE_SIZE);
+    rt.state.history.stats = Some(history::HistoryPane::fixture_stats());
+    rt.state.settings.labs.history_stats = true;
+    rt.state.settings.labs.history_stats_strip = true;
+    rt.invalidate();
+    settle(&mut rt);
+    assert!(rt.find("history-stats-strip").is_some());
+    assert!(rt.find("history-stats-open").is_some(), "Stats still shows");
+
+    tap(&mut rt, "history-stats-open");
+    assert!(rt.state.is_modal(Modal::HistoryStats));
+    assert!(rt.find("history-stats-dialog").is_some());
+    for key in [
+        "tile-dictations",
+        "tile-words",
+        "tile-time-saved",
+        "tile-wpm",
+        "tile-streak",
+        "tile-busiest-hour",
+    ] {
+        assert!(rt.find(key).is_some(), "{key} shows");
+    }
+    tap(&mut rt, "history-stats-close");
+    assert!(!rt.state.is_modal(Modal::HistoryStats));
+    assert!(
+        rt.find("history-stats-strip").is_some(),
+        "the strip stays above the list"
+    );
 }
 
 /// The dialog's worst case in the window's least size: it stays inside the
@@ -2105,6 +2335,55 @@ fn a_rows_copy_leaves_the_selection() {
     settle(&mut rt);
     assert_eq!(rt.state.history.copied, Some(1));
     assert_eq!(rt.state.history.selected, Some(2));
+}
+
+/// A hovered row's Copy, pressed a point inside its right edge, copies
+/// rather than scrolling when the list overflows under the scroll bar. The
+/// row fill still reaches the search field's edge, so selection stays flush.
+#[test]
+fn a_rows_copy_clears_the_scroll_bar() {
+    let mut rt = runtime("history", true, PANE_SIZE);
+    let seeds = rt.state.history.entries.clone();
+    for (index, seed) in seeds.iter().cycle().take(40).enumerate() {
+        let mut entry = seed.clone();
+        entry.id = 1_000 + index as u64;
+        rt.state.history.entries.push(entry);
+    }
+    rt.invalidate();
+    settle(&mut rt);
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("scroll-bar") && e.path.contains("history-scroll"))
+        .expect("an overflowing list shows its scroll bar");
+
+    let row = element(&rt, "history-entry1").rect;
+    rt.pointer_move(row[0] + row[2] / 2.0, row[1] + row[3] / 2.0);
+    settle(&mut rt);
+    let copy = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.path.contains("history-entry1/") && e.key.as_deref() == Some("row-copy"))
+        .expect("the row's Copy")
+        .rect;
+    let (x, y) = (copy[0] + copy[2] - 1.0, copy[1] + copy[3] / 2.0);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.history.copied,
+        Some(1),
+        "a press on the Copy's right edge copies"
+    );
+
+    let search = element(&rt, "history-search").rect;
+    let row = element(&rt, "history-entry2").rect;
+    assert!(
+        (row[0] + row[2] - (search[0] + search[2])).abs() < 0.5,
+        "the selected row ends at {} but the search field at {}",
+        row[0] + row[2],
+        search[0] + search[2]
+    );
 }
 
 #[test]
@@ -2697,7 +2976,46 @@ fn the_transcription_picker_asks_the_service_for_a_model() {
         "Whisper keeps the saved English"
     );
     tap(&mut rt, "close-picker");
-    assert!(!rt.state.picker.open);
+    assert!(!rt.state.is_modal(Modal::Picker));
+}
+
+#[test]
+fn choosing_the_selected_installed_but_unchecked_model_checks_it() {
+    use crate::transcription::models::{self, ModelRuntime};
+
+    let directory =
+        std::env::temp_dir().join(format!("hex-picker-unchecked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    models::set_test_models_dir(Some(directory.clone()));
+    let model = models::definition(TranscriptionModelId::ParakeetUnifiedEnglish);
+    let ModelRuntime::Gguf(artifact) = &model.runtime else {
+        unreachable!("Parakeet Unified English is a GGUF model")
+    };
+    std::fs::File::create(directory.join(artifact.local_name()))
+        .unwrap()
+        .set_len(artifact.bytes)
+        .unwrap();
+
+    let mut rt = runtime("picker", true, PANE_SIZE);
+    rt.state.settings.transcription = TranscriptionSelection {
+        model: model.id,
+        language: "en".into(),
+    };
+    // Readiness here comes from the filesystem: the file is installed but
+    // has no verification receipt yet.
+    rt.state.picker.installed = None;
+    picker::choose(&mut rt.state, &model);
+    assert_eq!(
+        sent(&rt),
+        [Request::ChooseModel {
+            model: model.id,
+            language: "en".into(),
+        }]
+    );
+
+    models::set_test_models_dir(None);
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// Scrolls the full model list until `key` is inside it, then presses it.
@@ -2857,29 +3175,22 @@ fn the_language_menu_opens_on_its_chosen_language() {
     );
 }
 
-/// A mode's language menu is the same long list in the kit's `Menu`, so its
-/// press reveals the chosen row too.
+/// Labs › Vocabulary files adds Import and Export to the sheet, and only
+/// then: off, the sheet is exactly as before.
 #[test]
-fn a_modes_language_menu_opens_on_its_chosen_language() {
-    let mut rt = runtime("modes-speech", true, PANE_SIZE);
-    tap(&mut rt, "mode-speech-language-0-trigger");
-    assert_eq!(
-        rt.state.open,
-        Some(Menu::ModeSpeechLanguage(modes::Selection::Custom(0)))
-    );
-    let spanish = crate::transcription::models::menu_order(
-        &crate::transcription::models::definition(TranscriptionModelId::ParakeetV3)
-            .language_choices(),
-    )
-    .iter()
-    .position(|code| *code == "es")
-    .unwrap();
-    let row = element(&rt, &format!("mode-speech-language-0-item{spanish}")).rect;
-    let menu = element(&rt, "mode-speech-language-0-menu").rect;
-    assert!(
-        row[1] >= menu[1] - 0.5 && row[1] + row[3] <= menu[1] + menu[3] + 0.5,
-        "row {row:?} outside menu {menu:?}"
-    );
+fn the_vocabulary_sheet_offers_files_only_with_its_lab_on() {
+    let mut rt = runtime("mac-settings-vocabulary", true, GOLDEN_SIZE);
+    settle(&mut rt);
+    assert!(rt.find("add-term").is_some());
+    assert!(rt.find("import-vocabulary").is_none());
+    assert!(rt.find("export-vocabulary").is_none());
+    rt.state.settings.labs.vocabulary_files = true;
+    rt.invalidate();
+    settle(&mut rt);
+    assert!(rt.find("import-vocabulary").is_some());
+    assert!(rt.find("export-vocabulary").is_some());
+    assert!(rt.find("add-term").is_some());
+    assert!(rt.find("close-vocabulary").is_some());
 }
 
 /// General's Vocabulary row opens the sheet, and Escape closes it.
@@ -2888,12 +3199,12 @@ fn the_vocabulary_row_opens_its_sheet() {
     let mut rt = runtime("portal", true, GOLDEN_SIZE);
     tap(&mut rt, "vocabulary-control");
     settle(&mut rt);
-    assert!(rt.state.vocabulary.open);
+    assert!(rt.state.is_modal(Modal::Vocabulary));
     assert!(rt.find("add-term").is_some());
     assert!(rt.find("vocabulary-boost").is_none());
     key(&mut rt, Key::Escape, Mods::default());
     settle(&mut rt);
-    assert!(!rt.state.vocabulary.open);
+    assert!(!rt.state.is_modal(Modal::Vocabulary));
 }
 
 /// A settle frame plus an outside press closes the sheet with its exit: the runtime lands the
@@ -2936,7 +3247,7 @@ fn add_term_scrolls_the_new_row_into_view() {
         })
         .collect();
     rt.state.vocabulary = super::vocabulary::VocabularyEditor::new(&rt.state.settings.vocabulary);
-    rt.state.vocabulary.open = true;
+    rt.state.modal = Some(Modal::Vocabulary);
     rt.invalidate();
     settle(&mut rt);
     tap(&mut rt, "add-term");
@@ -3047,7 +3358,7 @@ fn the_vocabulary_row_says_when_the_model_ignores_the_list() {
     settle(&mut rt);
     assert!(shows_note(&rt), "{:?}", texts(&rt));
     tap(&mut rt, "vocabulary-control");
-    assert!(rt.state.vocabulary.open);
+    assert!(rt.state.is_modal(Modal::Vocabulary));
     assert!(sheet_note(&rt));
     key(&mut rt, Key::Escape, Mods::default());
     settle(&mut rt);
@@ -3067,56 +3378,42 @@ fn the_vocabulary_row_says_when_the_model_ignores_the_list() {
     }
 
     let rt = runtime("vocabulary-unused", true, PANE_SIZE);
-    assert!(rt.state.vocabulary.open);
+    assert!(rt.state.is_modal(Modal::Vocabulary));
     assert!(sheet_note(&rt));
 }
 
 /// The Sounds row opens the sheet. A set's play button plays its dictation
-/// without choosing it, and pressing it again stops it; a chip plays one
-/// sound; picking a set saves it and plays it; Escape closes the sheet.
+/// without choosing it, and pressing it again stops it; picking a set saves
+/// it and plays it; Escape closes the sheet.
 #[test]
 fn the_sound_sets_sheet_plays_and_chooses_sets() {
-    use crate::feedback::{Audition, Cue, SoundSet};
+    use crate::feedback::SoundSet;
     let mut rt = runtime("portal", true, GOLDEN_SIZE);
     rt.state.settings.sound_effects = false;
     rt.state.settings.sound_effect_volume = 0.23;
     assert_eq!(rt.state.settings.sound_theme, SoundSet::Classic);
     open_advanced(&mut rt, Pane::General);
+    assert!(texts(&rt).iter().any(|text| text == "Off"));
     tap(&mut rt, "sound-set-control");
-    assert!(rt.state.sound_sets.open);
+    assert!(rt.state.is_modal(Modal::SoundSets));
     let playing = |rt: &Runtime<Ui>| rt.state.sound_sets.playing();
 
-    tap(&mut rt, "set-click/top/play");
-    assert_eq!(playing(&rt), Some((SoundSet::Click, Audition::Dictation)));
+    tap(&mut rt, "set-click/lines/top/play");
+    assert_eq!(playing(&rt), Some(SoundSet::Click));
     assert_eq!(rt.state.settings.sound_theme, SoundSet::Classic);
-    tap(&mut rt, "set-click/top/play");
+    tap(&mut rt, "set-click/lines/top/play");
     assert_eq!(playing(&rt), None);
-
-    // A single sound plays for under a second, so look before settling.
-    let (x, y) = rt.find("stage/cues/Stop").unwrap();
-    rt.pointer_down(x, y);
-    rt.pointer_up(x, y);
-    rt.frame(1.0 / 60.0);
-    assert_eq!(
-        playing(&rt),
-        Some((SoundSet::Classic, Audition::Cue(Cue::Stop)))
-    );
 
     tap(&mut rt, "set-wood");
     assert_eq!(rt.state.settings.sound_theme, SoundSet::Wood);
-    assert_eq!(playing(&rt), Some((SoundSet::Wood, Audition::Dictation)));
-    // The stage holds the HUD's window as the start sound plays.
-    for _ in 0..6 {
-        rt.frame(1.0 / 60.0);
-    }
-    let (window, _) = rt.presented("sound-sets-hud").expect("the HUD's window");
-    assert!(window[2] > 0.0 && window[3] > 0.0);
+    assert_eq!(playing(&rt), Some(SoundSet::Wood));
+    assert!(rt.find("set-wood/check/mark").is_some());
+    assert!(rt.find("set-classic/check/mark").is_none());
 
     key(&mut rt, Key::Escape, Mods::default());
     settle(&mut rt);
-    assert!(!rt.state.sound_sets.open);
+    assert!(!rt.state.is_modal(Modal::SoundSets));
     assert_eq!(playing(&rt), None);
-    assert!(texts(&rt).iter().any(|text| text == "Wood"));
     assert!(!rt.state.settings.sound_effects);
     assert_eq!(rt.state.settings.sound_effect_volume, 0.23);
 }
@@ -3218,7 +3515,7 @@ fn the_picker_keeps_focus_inside_and_escape_returns_it() {
     tab_to(&mut rt, "transcription-control");
     key(&mut rt, Key::Text(" ".into()), Mods::default());
     settle(&mut rt);
-    assert!(rt.state.picker.open);
+    assert!(rt.state.is_modal(Modal::Picker));
     for _ in 0..12 {
         key(&mut rt, Key::Tab, Mods::default());
         assert!(
@@ -3229,7 +3526,7 @@ fn the_picker_keeps_focus_inside_and_escape_returns_it() {
     }
     key(&mut rt, Key::Escape, Mods::default());
     settle(&mut rt);
-    assert!(!rt.state.picker.open);
+    assert!(!rt.state.is_modal(Modal::Picker));
     assert!(focused(&rt).ends_with("transcription-control"));
 }
 
@@ -3256,7 +3553,7 @@ fn settings_opens_the_picker_and_names_the_model_and_language_apart() {
         "{shown:?}"
     );
     tap(&mut rt, "transcription-control");
-    assert!(rt.state.picker.open);
+    assert!(rt.state.is_modal(Modal::Picker));
 }
 
 #[test]
@@ -3333,6 +3630,276 @@ fn a_found_model_moves_on_without_a_download_and_back_returns_to_it() {
     // Back returns to the list to change the pick.
     tap(&mut rt, "back");
     assert!(rt.find("model-list").is_some());
+}
+
+/// A model this build doesn't have: an import that isn't here, which
+/// `available()` refuses the way it refuses Parakeet Ultra with its Labs
+/// switch off.
+fn unavailable_model() -> TranscriptionModelId {
+    use crate::transcription::models::CustomModelId;
+    TranscriptionModelId::Custom(
+        CustomModelId::parse("custom-0123456789abcdef").expect("a custom id"),
+    )
+}
+
+/// A model file the service is preparing: a fresh import.
+fn imported_model() -> TranscriptionModelId {
+    use crate::transcription::models::CustomModelId;
+    TranscriptionModelId::Custom(
+        CustomModelId::parse("custom-fedcba9876543210").expect("a custom id"),
+    )
+}
+
+/// A pick onboarding refuses: the saved selection can't run, so the tour
+/// marks it failed and the page names it.
+fn refused_pick(rt: &mut Runtime<Ui>) {
+    rt.update(|ui, _| {
+        let selection = TranscriptionSelection {
+            model: unavailable_model(),
+            language: "en".into(),
+        };
+        ui.settings.transcription = selection.clone();
+        ui.found.choice = Some(selection);
+    });
+    rt.update(|ui, _| {
+        onboarding::input(
+            ui,
+            crate::desktop::onboarding::Input::Grant(crate::desktop::onboarding::SetupItem::Model),
+        )
+    });
+    settle(rt);
+}
+
+/// A found file this build can't run is dropped from the scan's answer: it
+/// never fills the model step, and never holds the recommended download.
+#[test]
+fn a_found_model_this_build_cannot_run_is_not_offered() {
+    let unavailable = || {
+        let mut found = super::found::fixture_catalog(TranscriptionModelId::ParakeetV3);
+        found.catalog = Some(unavailable_model());
+        found
+    };
+    let open = |models: Vec<crate::transcription::found_models::Found>| {
+        let mut ui = portal_fixture();
+        ui.found.models = models;
+        onboarding::fixture(&mut ui, crate::desktop::onboarding::Step::Setup, false);
+        onboarding_kit::live::fixture(&mut ui, Page::Download);
+        runtime_for(ui, false, PANE_SIZE)
+    };
+
+    // What the scan finds on its own still lists it, and holds ours back.
+    let rt = open(vec![unavailable()]);
+    assert!(texts(&rt).contains(&"Choose a speech model".to_owned()));
+    assert!(sent(&rt).is_empty(), "the download waits for the list");
+
+    // The window keeps only what this build can run: no list, and the
+    // recommended model downloads by itself.
+    let rt = open(super::found::keep_usable(vec![unavailable()]));
+    assert!(!texts(&rt).contains(&"Choose a speech model".to_owned()));
+    assert!(
+        matches!(
+            sent(&rt),
+            [Request::ChooseModel { model, .. }] if *model == rt.state.settings.transcription.model
+        ),
+        "{:?}",
+        sent(&rt)
+    );
+}
+
+/// A pick that can't run says why on the page instead of waiting at "0 of
+/// N MB" for a download that never starts.
+#[test]
+fn an_unavailable_pick_fails_the_page_instead_of_downloading_forever() {
+    let mut ui = portal_fixture();
+    onboarding::fixture(&mut ui, crate::desktop::onboarding::Step::Setup, false);
+    onboarding_kit::live::fixture(&mut ui, Page::Download);
+    let mut rt = runtime_for(ui, false, PANE_SIZE);
+    assert!(matches!(sent(&rt), [Request::ChooseModel { .. }]));
+    let before = sent(&rt).len();
+
+    // The list's pick isn't a model this build has.
+    rt.update(|ui, _| {
+        let selection = TranscriptionSelection {
+            model: unavailable_model(),
+            language: "en".into(),
+        };
+        ui.settings.transcription = selection.clone();
+        ui.found.choice = Some(selection);
+        ui.found.picked = Some(1);
+    });
+    rt.update(|ui, _| {
+        onboarding::input(
+            ui,
+            crate::desktop::onboarding::Input::Grant(crate::desktop::onboarding::SetupItem::Model),
+        )
+    });
+    settle(&mut rt);
+
+    assert_eq!(sent(&rt).len(), before, "nothing is asked of the service");
+    assert_eq!(
+        rt.state.tour.as_ref().unwrap().flow.view().model,
+        crate::desktop::onboarding::ItemStatus::Failed
+    );
+    assert!(rt.state.found.picked.is_none(), "the pick is cleared");
+    assert!(
+        rt.state.error.is_none(),
+        "the reason belongs to the pick, not Settings' status: {:?}",
+        rt.state.error
+    );
+    let shown = texts(&rt);
+    assert!(
+        shown.iter().any(|text| text.ends_with("is unavailable")),
+        "{shown:?}"
+    );
+    assert!(!shown.contains(&"0 of 731 MB".to_owned()), "{shown:?}");
+    assert!(shown.contains(&"Try again".to_owned()), "{shown:?}");
+}
+
+/// Try again after a refused pick forgets that pick's reason: the next
+/// failure is the one this attempt earned, not the old one.
+#[test]
+fn retrying_after_a_refused_pick_shows_the_next_download_failure() {
+    let mut ui = portal_fixture();
+    onboarding::fixture(&mut ui, crate::desktop::onboarding::Step::Setup, false);
+    onboarding_kit::live::fixture(&mut ui, Page::Download);
+    let mut rt = runtime_for(ui, false, PANE_SIZE);
+    let before = sent(&rt).len();
+
+    // A pick that can't run: the page names it.
+    refused_pick(&mut rt);
+    assert!(
+        texts(&rt)
+            .iter()
+            .any(|text| text.ends_with("is unavailable")),
+        "the refused pick says why"
+    );
+
+    // Try again asks for the saved model and clears the old reason.
+    tap(&mut rt, "retry-download");
+    assert!(
+        rt.state.found.error.is_none(),
+        "the pick's reason goes with it"
+    );
+    assert_eq!(sent(&rt).len(), before + 1, "the retry asks again");
+
+    // That attempt fails: its own failure is what the page names.
+    rt.update(|ui, _| {
+        if let Some(view) = &mut ui.view {
+            view.transcription.preparing = None;
+            view.transcription.error =
+                Some("Couldn't reach huggingface.co: the connection was reset".into());
+        }
+    });
+    settle(&mut rt);
+    let shown = texts(&rt);
+    assert!(
+        shown
+            .iter()
+            .any(|text| text.contains("the connection was reset")),
+        "{shown:?}"
+    );
+    assert!(
+        !shown.iter().any(|text| text.ends_with("is unavailable")),
+        "the old pick's reason must not come back: {shown:?}"
+    );
+    assert!(shown.contains(&"Try again".to_owned()), "{shown:?}");
+}
+
+/// A pick the tour still reports failed keeps its actions even when the
+/// reason itself is gone (the file chooser that clears nothing, a message
+/// someone dismissed): no page is left with no way forward.
+#[test]
+fn a_failed_pick_keeps_its_actions_without_a_reason() {
+    let mut ui = portal_fixture();
+    onboarding::fixture(&mut ui, crate::desktop::onboarding::Step::Setup, false);
+    onboarding_kit::live::fixture(&mut ui, Page::Download);
+    let mut rt = runtime_for(ui, false, PANE_SIZE);
+    refused_pick(&mut rt);
+    assert!(
+        rt.find("retry-download").is_some(),
+        "the refused pick offers Try again"
+    );
+
+    rt.update(|ui, _| ui.found.error = None);
+    settle(&mut rt);
+    assert!(
+        rt.state.tour.as_ref().unwrap().flow.pick_failed(),
+        "the tour still reports the pick"
+    );
+    assert!(rt.find("retry-download").is_some(), "Try again stays");
+    assert!(rt.find("use-file").is_some(), "Use a model file… stays");
+    assert!(
+        rt.find("continue-without-model").is_some(),
+        "Continue without a model stays"
+    );
+    assert!(
+        !texts(&rt).contains(&"0 of 731 MB".to_owned()),
+        "the page never reads as a download: {:?}",
+        texts(&rt)
+    );
+}
+
+/// A model file being prepared replaces the refused pick: no stale reason and
+/// no Try again over the load, which would cancel the import.
+#[test]
+fn a_model_being_prepared_hides_the_refused_pick() {
+    let mut ui = portal_fixture();
+    onboarding::fixture(&mut ui, crate::desktop::onboarding::Step::Setup, false);
+    onboarding_kit::live::fixture(&mut ui, Page::Download);
+    let mut rt = runtime_for(ui, false, PANE_SIZE);
+    refused_pick(&mut rt);
+    assert!(
+        rt.find("retry-download").is_some(),
+        "the refused pick offers Try again"
+    );
+
+    // The import the person chose is loading; the window's settings catch up
+    // only once it is ready.
+    rt.update(|ui, _| {
+        if let Some(view) = &mut ui.view {
+            view.transcription.preparing = Some(imported_model());
+        }
+    });
+    settle(&mut rt);
+    assert!(
+        rt.find("retry-download").is_none(),
+        "no Try again over the load"
+    );
+    assert!(
+        !texts(&rt)
+            .iter()
+            .any(|text| text.ends_with("is unavailable")),
+        "the refused pick's reason stays gone: {:?}",
+        texts(&rt)
+    );
+    assert!(
+        rt.find("download-failed").is_none(),
+        "the page is not a failure while the file prepares"
+    );
+}
+
+/// Try again after a plain download failure asks for that model once.
+#[test]
+fn try_again_after_a_network_failure_asks_once() {
+    let mut ui = portal_fixture();
+    onboarding::fixture(&mut ui, crate::desktop::onboarding::Step::Setup, false);
+    onboarding_kit::live::fixture(&mut ui, Page::Download);
+    let mut rt = runtime_for(ui, false, PANE_SIZE);
+    let before = sent(&rt).len();
+    rt.update(|ui, _| {
+        if let Some(view) = &mut ui.view {
+            view.transcription.preparing = None;
+            view.transcription.error =
+                Some("Couldn't reach huggingface.co: the connection was reset".into());
+        }
+    });
+    settle(&mut rt);
+    assert!(
+        rt.find("retry-download").is_some(),
+        "the failure offers Try again"
+    );
+    tap(&mut rt, "retry-download");
+    assert_eq!(sent(&rt).len(), before + 1, "{:?}", sent(&rt));
 }
 
 #[test]
@@ -3673,23 +4240,50 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// The lab What's new lists first: the newest offered lab, tie-broken by
+/// its place in the registry, as the feed sorts it.
+fn newest_offered_lab(ui: &Ui) -> &'static str {
+    labs::offered_labs(ui)
+        .into_iter()
+        .max_by_key(|(feature, _)| {
+            (
+                feature.added(),
+                crate::labs::Feature::ALL
+                    .iter()
+                    .position(|known| known == feature)
+                    .unwrap_or(0),
+            )
+        })
+        .expect("the fixture offers a lab")
+        .0
+        .name()
+}
+
 #[test]
 fn whats_new_opens_controls_without_changing_them() {
     let _goldens = Goldens::collect();
     for dark in [true, false] {
-        for (key, scene) in [
-            (None, "whats-new"),
-            (Some("open-lab"), "whats-new-yolo"),
-            (Some("open-sounds"), "whats-new-sounds"),
-        ] {
+        for scene in ["whats-new", "whats-new-newest", "whats-new-sounds"] {
             let mut rt = runtime("mac-settings", dark, PANE_SIZE);
+            let newest = newest_offered_lab(&rt.state);
             let before = serde_json::to_value(&rt.state.settings).unwrap();
             tap(&mut rt, "nav-whats-new");
             assert_eq!(rt.state.pane, Pane::WhatsNew);
-            if let Some(key) = key {
-                tap(&mut rt, key);
-                if key == "open-lab" {
-                    assert!(rt.state.labs_open && rt.find("lab-card-yolo-mode").is_some());
+            if scene != "whats-new" {
+                let key = if scene == "whats-new-newest" {
+                    format!("open-lab-{newest}")
+                } else {
+                    "open-sounds".to_owned()
+                };
+                // The feed is taller than the window; reach the oldest entry
+                // before pressing it.
+                scroll_into_view(&mut rt, &key, "whats-new-scroll");
+                tap(&mut rt, &key);
+                if scene == "whats-new-newest" {
+                    assert!(
+                        rt.state.labs_open && rt.find(&format!("lab-card-{newest}")).is_some(),
+                        "the newest lab's card opens"
+                    );
                 } else {
                     assert!(rt.find("sound-sets").is_some());
                 }
@@ -3698,6 +4292,44 @@ fn whats_new_opens_controls_without_changing_them() {
             check_render(scene, dark, render_runtime(rt, PANE_SIZE));
         }
     }
+}
+
+/// What's new lists the newest lab the registry offers, no more than eight
+/// labs, and each lab's button and row keys are its own.
+#[test]
+fn whats_new_lists_the_newest_offered_labs() {
+    let mut rt = runtime("mac-settings", true, (980.0, 2600.0));
+    let newest = newest_offered_lab(&rt.state);
+    tap(&mut rt, "nav-whats-new");
+    let buttons: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter_map(|element| element.key)
+        .filter_map(|key| key.strip_prefix("open-lab-").map(str::to_string))
+        .collect();
+    assert_eq!(buttons.first().map(String::as_str), Some(newest));
+    assert_eq!(
+        buttons.len(),
+        labs::offered_labs(&rt.state).len().min(8),
+        "every offered lab up to eight: {buttons:?}"
+    );
+    let mut unique = buttons.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        buttons.len(),
+        unique.len(),
+        "no two labs share a button: {buttons:?}"
+    );
+    assert!(rt.find("open-sounds").is_some(), "sounds stays");
+    for lab in unique {
+        assert!(
+            rt.find(&format!("highlight-{lab}")).is_some(),
+            "{lab}'s row has its own key"
+        );
+    }
+    tap(&mut rt, &format!("open-lab-{newest}"));
+    assert!(rt.state.labs_open && rt.find(&format!("lab-card-{newest}")).is_some());
 }
 
 /// Collects every golden mismatch in a test and fails once at the end, so
@@ -3731,6 +4363,7 @@ fn goldens() {
         for scene in [
             "mac-planner",
             "history",
+            "history-stats-strip",
             "captures",
             "mac-labs",
             "mac-labs-link",
@@ -3738,7 +4371,6 @@ fn goldens() {
             "output",
             "modes",
             "modes-picker",
-            "modes-speech",
             "picker-downloading",
             // Labs › Transcribe dropped audio: the hint a file drag shows and
             // the toast of the file running with its progress.
@@ -3815,6 +4447,98 @@ fn the_trust_prompt_lists_what_a_config_reaches_until_it_is_allowed() {
     assert!(rt.find("allow-transformations").is_none());
 }
 
+/// The agent card keeps its text clear of its buttons when a longer
+/// interface language makes the title and example wrap (#2711). 536 pt is
+/// the narrowest window the report shows, below the window's usual minimum.
+#[test]
+fn hungarian_output_keeps_the_agent_cards_text_clear_of_its_buttons() {
+    // The language is per test thread; put English back for whichever test
+    // this thread runs next, even if an assertion below fails.
+    struct RestoreEnglish;
+    impl Drop for RestoreEnglish {
+        fn drop(&mut self) {
+            crate::desktop::i18n::apply(Some("en"));
+        }
+    }
+    let _english = RestoreEnglish;
+    let case = |scene: &str, width: f32| {
+        let mut rt = runtime(scene, true, (width, 500.0));
+        crate::desktop::i18n::apply(Some("hu"));
+        rt.invalidate();
+        settle(&mut rt);
+        rt
+    };
+
+    let overlaps = |a: [f32; 4], b: [f32; 4]| {
+        a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+    };
+
+    // At the usual window width the actions share the text's row, so their
+    // left edge is the line the copy must not cross.
+    let wide = case("output", 980.0);
+    let title = element(&wide, "example-title").rect;
+    let request = element(&wide, "example-request").rect;
+    let open = element(&wide, "open-settings-file").rect;
+    let edit = element(&wide, "edit-with-agent").rect;
+    let card = element(&wide, "agent-card").rect;
+    assert!(
+        title[0] + title[2] <= open[0],
+        "the title runs under Open file: {title:?} vs {open:?}"
+    );
+    assert!(
+        request[0] + request[2] <= open[0],
+        "the example runs under Open file: {request:?} vs {open:?}"
+    );
+    assert!(
+        edit[0] + edit[2] <= card[0] + card[2],
+        "Edit with agent leaves the card: {edit:?} vs {card:?}"
+    );
+
+    let output = case("output", 536.0);
+    let title = element(&output, "example-title").rect;
+    let request = element(&output, "example-request").rect;
+    let open = element(&output, "open-settings-file").rect;
+    let edit = element(&output, "edit-with-agent").rect;
+    let card = element(&output, "agent-card").rect;
+    for (name, text) in [("title", title), ("example", request)] {
+        assert!(
+            !overlaps(text, open),
+            "the {name} runs under Open file: {text:?} vs {open:?}"
+        );
+        assert!(
+            !overlaps(text, edit),
+            "the {name} runs under Edit with agent: {text:?} vs {edit:?}"
+        );
+    }
+    assert!(
+        edit[0] + edit[2] <= card[0] + card[2],
+        "Edit with agent leaves the card: {edit:?} vs {card:?}"
+    );
+
+    // After Edit with agent, the same title is a plain line instead of the
+    // animated one, so it must wrap on its own.
+    let copied = case("output-open", 536.0);
+    let title = copied
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.path.contains("agent-card") && e.path.ends_with("/copy/title"))
+        .map(|e| e.rect)
+        .expect("the copied title");
+    let open = element(&copied, "open-settings-file").rect;
+    let edit = element(&copied, "edit-with-agent").rect;
+    let card = element(&copied, "agent-card").rect;
+    for (button, name) in [(open, "Open file"), (edit, "Edit with agent")] {
+        assert!(
+            !overlaps(title, button),
+            "the copied title runs under {name}: {title:?} vs {button:?}"
+        );
+    }
+    assert!(
+        edit[0] + edit[2] <= card[0] + card[2],
+        "Edit with agent leaves the card: {edit:?} vs {card:?}"
+    );
+}
+
 /// Labs › Transform typed text: Output's Typed text section and its
 /// recorder appear only with the lab on, and the recorder listens like the
 /// raw dictation shortcut's.
@@ -3865,7 +4589,7 @@ fn output_fixes_show_only_with_their_lab_and_fix_this_copies_for_the_sentence() 
         Some("Um, open code shipped the hex app today.")
     );
     tap(&mut on, "output-vocabulary");
-    assert!(on.state.vocabulary.open);
+    assert!(on.state.is_modal(Modal::Vocabulary));
 }
 
 #[test]

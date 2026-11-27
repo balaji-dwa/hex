@@ -295,6 +295,7 @@ fn lone_rule() -> Route {
         suggested: Vec::new(),
         recent: Vec::new(),
         site: Some("docs.example.com".into()),
+        by: crate::capture_host::AutoSendBy::Rule,
     }
 }
 
@@ -378,7 +379,7 @@ fn dest(name: &str, why: &str, folder: &str) -> Dest {
 
 fn recent() -> Vec<Dest> {
     vec![
-        dest("RUNE", "2 min ago", "rune"),
+        dest("RUNE", "2m ago", "rune"),
         dest("SCRAWL", "an hour ago", "hex"),
         dest("HOME", "yesterday", "home"),
     ]
@@ -392,6 +393,7 @@ fn rule() -> Route {
         suggested: vec![to],
         recent: recent(),
         site: Some("example.com".into()),
+        by: crate::capture_host::AutoSendBy::Rule,
     }
 }
 
@@ -453,10 +455,13 @@ impl Playground {
             | Action::Discard
             | Action::OpenScreenshots { .. }
             | Action::Send { .. }
+            | Action::Copy(_)
             | Action::Paste(_)
             | Action::Pen
             | Action::Hold(_)
-            | Action::Inspect => {}
+            | Action::Inspect
+            | Action::SaveRule { .. }
+            | Action::OpenRules => {}
         }
     }
 
@@ -520,6 +525,10 @@ fn poll(s: &mut CapsuleState, wall: f64, tx: &mut Tx) -> bool {
             Step::Hover(on) => {
                 s.now = now;
                 s.hover(super::Part::Pill, on, tx);
+                // A pointer that comes onto the capsule moves on it.
+                if on {
+                    s.pointer_moved(tx);
+                }
             }
             Step::Again => {
                 if let Some(pg) = s.playground.as_mut() {

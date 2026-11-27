@@ -10,14 +10,69 @@ use crate::paste::{
     recent::{self, Request, Target},
 };
 use crate::suppression::InputEvent;
-use std::sync::mpsc::{self, SyncSender};
+use crate::transcription::engine::TranscriptionEngine;
+use std::sync::{
+    Arc,
+    mpsc::{self, SyncSender},
+};
 use std::time::{Duration, Instant};
+
+/// Labs › Paste Last picker as the listener holds it: the picker and the
+/// cancel path's word writer exist only while the lab is on. `sync` runs on
+/// every listener pass, so the switch applies without a restart, and turning
+/// it off drops both (closing an open picker), leaving Paste Last and Cancel
+/// exactly as they are without the lab.
+pub(super) struct Lab {
+    history: Option<History>,
+    engine: Option<Arc<TranscriptionEngine>>,
+    picker: Option<Picker>,
+    writer: Option<super::cancelled_words::Writer>,
+}
+
+impl Lab {
+    pub fn new(history: Option<History>, engine: Option<Arc<TranscriptionEngine>>) -> Self {
+        Self {
+            history,
+            engine,
+            picker: None,
+            writer: None,
+        }
+    }
+    pub fn sync(&mut self, on: bool) {
+        if on {
+            if self.picker.is_none() {
+                self.picker = Some(Picker::new(self.history.clone()));
+            }
+        } else {
+            self.picker = None;
+            self.writer = None;
+        }
+    }
+    pub fn busy(&self) -> bool {
+        self.picker.as_ref().is_some_and(Picker::busy)
+    }
+    pub fn picker(&mut self) -> Option<&mut Picker> {
+        self.picker.as_mut()
+    }
+    /// Started on the first deliberate cancel after the lab turns on.
+    pub fn writer(&mut self) -> Option<&super::cancelled_words::Writer> {
+        self.picker.as_ref()?;
+        if self.writer.is_none() {
+            let history = self.history.clone()?;
+            let engine = self.engine.clone()?;
+            self.writer = super::cancelled_words::Writer::start(history, engine);
+        }
+        self.writer.as_ref()
+    }
+}
 
 struct Invocation {
     epoch: u64,
     binding: RuntimeHotkey,
     target: Target,
     check: Instant,
+    /// The rows are being read for this invocation.
+    reading: bool,
 }
 pub(super) struct Picker {
     hold: Gesture,
@@ -54,11 +109,16 @@ impl Picker {
         if !can_hold {
             return worker.paste_recent(Request { id: None, target });
         }
+        let epoch = browse::begin();
+        // Read the rows while the key is held, so the picker opens the
+        // moment the hold passes; a tap leaves them unread.
+        let reading = self.read(epoch).is_ok();
         self.active = Some(Invocation {
-            epoch: browse::begin(),
+            epoch,
             binding,
             target,
             check: Instant::now(),
+            reading,
         });
         self.hold.press(binding, at, true);
         Ok(())
@@ -72,14 +132,9 @@ impl Picker {
         if self.active.is_none() {
             return Ok(());
         }
+        // Open, the picker outlives the keys: the session tap's keys, a
+        // click on a row, or a click outside it end it.
         if browse::open() {
-            if let InputEvent::Flags(flags) = event
-                && let Some(inv) = &self.active
-                && !inv.binding.modifiers.is_empty()
-                && !inv.binding.required_modifiers_down(flags)
-            {
-                browse::nav(Nav::Commit);
-            }
             if matches!(event, InputEvent::TapDisabled) {
                 self.cancel();
             }
@@ -115,6 +170,12 @@ impl Picker {
                     id: Some(id),
                     target: inv.target,
                 }),
+                Choice::Open(id) => {
+                    if let Some(bundle) = recent::capture_bundle(&id) {
+                        crate::rune_ui::paste_picker::open_in_editor(&bundle);
+                    }
+                    Ok(())
+                }
             };
         }
         let effect = self.hold.tick(CaptureInstant::now());
@@ -138,31 +199,50 @@ impl Picker {
                 })
             }
             Effect::Browse => {
-                let epoch = self.active.as_ref().unwrap().epoch;
-                if self.reader.is_none() {
-                    let (tx, rx) = mpsc::sync_channel(1);
-                    let history = self.history.clone();
-                    std::thread::Builder::new()
-                        .name("paste-choices".into())
-                        .spawn(move || {
-                            while let Ok(epoch) = rx.recv() {
-                                let rows = history
-                                    .as_ref()
-                                    .map(recent::current_rows)
-                                    .unwrap_or_default();
-                                browse::show(epoch, rows);
-                            }
-                        })
-                        .map_err(|_| "paste list is unavailable")?;
-                    self.reader = Some(tx);
-                }
-                if self.reader.as_ref().unwrap().try_send(epoch).is_err() {
+                let inv = self.active.as_ref().unwrap();
+                let (epoch, reading) = (inv.epoch, inv.reading);
+                browse::reveal(epoch);
+                if !reading && let Err(error) = self.read(epoch) {
                     self.cancel();
-                    return Err("paste list is busy");
+                    return Err(error);
                 }
                 Ok(())
             }
         }
+    }
+    /// Asks the one bounded reader for this invocation's rows.
+    fn read(&mut self, epoch: u64) -> Result<(), &'static str> {
+        if self.reader.is_none() {
+            let (tx, rx) = mpsc::sync_channel(4);
+            let history = self.history.clone();
+            std::thread::Builder::new()
+                .name("paste-choices".into())
+                .spawn(move || {
+                    while let Ok(mut epoch) = rx.recv() {
+                        // Only the newest press can still be current.
+                        while let Ok(newer) = rx.try_recv() {
+                            epoch = newer;
+                        }
+                        let Some(history) = history.as_ref() else {
+                            browse::show(epoch, Vec::new());
+                            continue;
+                        };
+                        // The first rows open the picker at once; the deep
+                        // list follows, unless a tap or a choice came first.
+                        browse::show(epoch, recent::current_rows(history, recent::FIRST));
+                        if browse::wants(epoch) {
+                            browse::extend(epoch, recent::current_rows(history, recent::DEEP));
+                        }
+                    }
+                })
+                .map_err(|_| "paste list is unavailable")?;
+            self.reader = Some(tx);
+        }
+        self.reader
+            .as_ref()
+            .unwrap()
+            .try_send(epoch)
+            .map_err(|_| "paste list is busy")
     }
     pub fn cancel(&mut self) {
         if self.active.take().is_some() {
@@ -174,5 +254,59 @@ impl Picker {
 impl Drop for Picker {
     fn drop(&mut self) {
         self.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paste::gesture::Effect;
+
+    /// Paste Last runs the same gesture over an Annotate capture or a
+    /// meeting as anywhere else (the capture never takes the shortcut): a
+    /// tap pastes, a hold opens the picker.
+    #[test]
+    fn paste_last_taps_and_holds_while_annotate_records() {
+        use crate::app_settings::{HotkeyBinding, OPTION_KEY_MASK, SHIFT_KEY_MASK};
+        let binding = HotkeyBinding::paste_last_default().runtime();
+        let v = binding.key_code.expect("Paste Last binds a key");
+        let key = |code, down, flags| InputEvent::Key { code, down, flags };
+        let held = OPTION_KEY_MASK | SHIFT_KEY_MASK;
+        let at = |ms| CaptureInstant::from_nanos(ms * 1_000_000u64);
+        let mut lab = Lab::new(None, None);
+        lab.sync(true);
+        let picker = lab.picker().unwrap();
+        assert_eq!(picker.hold.press(binding, at(0), true), Effect::Wait);
+        let up = key(v, false, held);
+        assert_eq!(picker.hold.edge(up, at(90)), Effect::PasteLatest);
+        assert_eq!(picker.hold.press(binding, at(1_000), true), Effect::Wait);
+        assert_eq!(picker.hold.tick(at(1_400)), Effect::Browse);
+    }
+
+    #[test]
+    fn toggling_the_lab_after_start_changes_what_holding_paste_last_does() {
+        let binding = RuntimeHotkey {
+            modifiers: Default::default(),
+            key_code: Some(9),
+        };
+        let at = |ms| CaptureInstant::from_nanos(ms * 1_000_000u64);
+        // Off at listener start: no picker, so Paste Last repastes.
+        let mut lab = Lab::new(None, None);
+        lab.sync(false);
+        assert!(lab.picker().is_none() && lab.writer().is_none());
+        // Turned on later: the next pass builds the picker, and a hold browses.
+        lab.sync(true);
+        let picker = lab.picker().expect("picker once the lab is on");
+        assert_eq!(picker.hold.press(binding, at(0), true), Effect::Wait);
+        assert_eq!(picker.hold.tick(at(400)), Effect::Browse);
+        // Off again mid-hold: the picker and its pending hold are gone.
+        lab.sync(false);
+        assert!(lab.picker().is_none() && !lab.busy());
+        // On once more: a fresh gesture, nothing left of the old hold.
+        lab.sync(true);
+        assert_eq!(
+            lab.picker().unwrap().hold.press(binding, at(600), false),
+            Effect::PasteLatest
+        );
     }
 }

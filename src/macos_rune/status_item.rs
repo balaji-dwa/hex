@@ -13,10 +13,16 @@ use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSSize, NSString};
 
 use crate::app_settings::{AppSettings, HotkeyBinding};
 use crate::calendar::CalendarMeeting;
-use crate::desktop::i18n::{tr, tr_fill};
+use crate::desktop::i18n::{menu_label as label, tr, tr_fill};
 use crate::desktop::tray_menu::model_menu_entries;
+use crate::dictation::vocabulary::VocabularyEntry;
 use crate::transcription::models::{MODELS, TranscriptionModelId};
 use crate::transcription::preparation::PreparationStatus;
+
+mod upcoming;
+
+use upcoming::refresh_upcoming;
+pub use upcoming::update_calendar_menu;
 
 const IDLE_ICON_PNG: &[u8] = include_bytes!("../../assets/icons/menubar-idle@2x.png");
 const RECORDING_ICON_PNG: &[u8] = include_bytes!("../../assets/icons/menubar-recording@2x.png");
@@ -26,6 +32,11 @@ const STATUS_ICON_POINTS: f64 = 18.0;
 pub enum StatusItemAction {
     OpenSettings,
     OpenModels,
+    /// Labs › Vocabulary menu: the Vocabulary sheet, with a new focused term
+    /// row at its end.
+    AddVocabularyTerm,
+    /// Labs › Vocabulary menu: the Vocabulary sheet alone.
+    OpenVocabulary,
     SelectModel(TranscriptionModelId),
     CancelModelPreparation,
     PasteLast,
@@ -40,10 +51,15 @@ pub enum StatusItemAction {
     JoinCalendarMeeting(CalendarMeeting),
     StartMeeting,
     StopMeeting,
+    /// Labs › Mute the microphone while recording: the recording's microphone
+    /// leaves or returns.
+    ToggleMeetingMicrophoneMute,
     CopyLastMeetingTranscript,
     /// Pause Hex, or Resume Hex while shortcuts are suspended (Labs › Pause
     /// from menu bar).
     TogglePause,
+    /// Start or stop an annotation (Annotate on and Scrawl.app not owning it).
+    ToggleAnnotate,
     /// Copy chapter `n` of the recording meeting (Labs).
     CopyChapter(usize),
     /// The recording row: the Meetings pane.
@@ -75,6 +91,22 @@ objc2::define_class!(
         #[unsafe(method(openModels:))]
         fn open_models(&self, _sender: &AnyObject) {
             let _ = self.ivars().actions.try_send(StatusItemAction::OpenModels);
+        }
+
+        #[unsafe(method(addVocabularyTerm:))]
+        fn add_vocabulary_term(&self, _sender: &AnyObject) {
+            let _ = self
+                .ivars()
+                .actions
+                .try_send(StatusItemAction::AddVocabularyTerm);
+        }
+
+        #[unsafe(method(openVocabulary:))]
+        fn open_vocabulary(&self, _sender: &AnyObject) {
+            let _ = self
+                .ivars()
+                .actions
+                .try_send(StatusItemAction::OpenVocabulary);
         }
 
         #[unsafe(method(selectModel:))]
@@ -132,11 +164,13 @@ objc2::define_class!(
         fn menu_needs_update(&self, _menu: &NSMenu) {
             relabel();
             refresh_recent_dictations();
+            refresh_vocabulary();
             refresh_copy_dictation_audio();
             refresh_restore_capture();
             refresh_planner_steps();
             refresh_upcoming();
             update_pause();
+            refresh_annotate();
         }
 
         /// Restore Last Capture is dimmed while no closed card can come
@@ -210,6 +244,16 @@ objc2::define_class!(
             let _ = self.ivars().actions.try_send(StatusItemAction::StopMeeting);
         }
 
+        /// Labs › Mute the microphone while recording: Hex's microphone leaves
+        /// the recording while the call's audio keeps it.
+        #[unsafe(method(muteMeeting:))]
+        fn mute_meeting(&self, _sender: &AnyObject) {
+            let _ = self
+                .ivars()
+                .actions
+                .try_send(StatusItemAction::ToggleMeetingMicrophoneMute);
+        }
+
         #[unsafe(method(copyLastMeetingTranscript:))]
         fn copy_last_meeting_transcript(&self, _sender: &AnyObject) {
             let _ = self
@@ -223,6 +267,11 @@ objc2::define_class!(
         #[unsafe(method(togglePause:))]
         fn toggle_pause(&self, _sender: &AnyObject) {
             let _ = self.ivars().actions.try_send(StatusItemAction::TogglePause);
+        }
+
+        #[unsafe(method(toggleAnnotate:))]
+        fn toggle_annotate(&self, _sender: &AnyObject) {
+            let _ = self.ivars().actions.try_send(StatusItemAction::ToggleAnnotate);
         }
 
         #[unsafe(method(copyChapter:))]
@@ -280,17 +329,25 @@ enum Row {
     MeetingSeparator,
     /// Labs › Pause from menu bar: hidden until the menu opens with it on.
     PauseHex,
+    /// Annotate (or Stop Annotating while recording), shown while Annotate is
+    /// on and Scrawl.app is not owning it.
+    Annotate,
     PasteLast,
     /// Labs › Copy dictation audio: hidden until the menu opens with it on.
     CopyLastDictationAudio,
     /// Labs › Copy recent dictations: hidden until the menu opens with it on.
     CopyRecentDictation,
     CopyLastMeetingTranscript,
+    /// Labs › Mute the microphone while recording: hidden until a meeting
+    /// records with the lab on.
+    MuteMeeting,
     /// Labs › Screenshots: hidden until the menu opens with it on.
     RestoreCapture,
     /// Labs › Planner: toggle the pinned Today's Steps overlay.
     PlannerSteps,
     SpeechModel,
+    /// Labs › Vocabulary menu: hidden until the menu opens with it on.
+    Vocabulary,
     Separator,
     Settings,
     Update,
@@ -300,7 +357,7 @@ enum Row {
 /// How many upcoming meetings the menu lists at most.
 const UPCOMING_ROWS: usize = crate::calendar_menu::MAX_ROWS;
 
-const ROWS: [Row; 25] = [
+const ROWS: [Row; 28] = [
     Row::UpcomingHeader,
     Row::UpcomingSlot,
     Row::UpcomingSlot,
@@ -311,10 +368,12 @@ const ROWS: [Row; 25] = [
     Row::UpcomingSeparator,
     Row::MeetingStatus,
     Row::StopMeeting,
+    Row::MuteMeeting,
     Row::CopySection,
     Row::RecordMeeting,
     Row::MeetingSeparator,
     Row::PauseHex,
+    Row::Annotate,
     Row::PasteLast,
     Row::CopyLastDictationAudio,
     Row::CopyRecentDictation,
@@ -322,6 +381,7 @@ const ROWS: [Row; 25] = [
     Row::RestoreCapture,
     Row::PlannerSteps,
     Row::SpeechModel,
+    Row::Vocabulary,
     Row::Separator,
     Row::Settings,
     Row::Update,
@@ -340,9 +400,11 @@ impl Row {
             Row::UpcomingEmpty => tr("No upcoming meetings").into(),
             Row::MeetingStatus => tr("Recording").into(),
             Row::StopMeeting => label("Stop & Transcribe", tr("Stop & transcribe")),
+            Row::MuteMeeting => mute_title(),
             Row::CopySection => label("Copy Section", tr("Copy section")),
             Row::RecordMeeting => label("Record Meeting", tr("Record meeting")),
             Row::PauseHex => pause_title(false),
+            Row::Annotate => annotate_title(false),
             #[cfg(hex_capture)]
             Row::PasteLast if crate::paste::recent::enabled() => {
                 label("Paste Last", tr("Paste last"))
@@ -361,6 +423,7 @@ impl Row {
             Row::RestoreCapture => label("Restore Last Capture", tr("Restore last capture")),
             Row::PlannerSteps => label("Today’s Steps", tr("Today's steps")),
             Row::SpeechModel => label("Speech Model", tr("Speech model")),
+            Row::Vocabulary => label("Vocabulary", tr("Vocabulary")),
             Row::Settings => label("Settings…", tr("Settings")),
             Row::Update => update_title(&crate::desktop::host::DesktopUpdateStatus::Checking),
             Row::Quit => tr_fill("Quit {}", crate::app_paths::app_name()),
@@ -371,7 +434,12 @@ impl Row {
     fn titled_by_state(self) -> bool {
         matches!(
             self,
-            Row::UpcomingSlot | Row::MeetingStatus | Row::PauseHex | Row::Update
+            Row::UpcomingSlot
+                | Row::MeetingStatus
+                | Row::MuteMeeting
+                | Row::PauseHex
+                | Row::Annotate
+                | Row::Update
         )
     }
 
@@ -380,8 +448,10 @@ impl Row {
             Row::UpcomingSlot => sel!(openCalendarMeeting:),
             Row::MeetingStatus => sel!(openMeetings:),
             Row::StopMeeting => sel!(stopMeeting:),
+            Row::MuteMeeting => sel!(muteMeeting:),
             Row::RecordMeeting => sel!(startMeeting:),
             Row::PauseHex => sel!(togglePause:),
+            Row::Annotate => sel!(toggleAnnotate:),
             Row::PasteLast => sel!(pasteLast:),
             Row::CopyLastDictationAudio => sel!(copyLastDictationAudio:),
             Row::CopyLastMeetingTranscript => sel!(copyLastMeetingTranscript:),
@@ -397,7 +467,8 @@ impl Row {
             | Row::Separator
             | Row::CopySection
             | Row::CopyRecentDictation
-            | Row::SpeechModel => return None,
+            | Row::SpeechModel
+            | Row::Vocabulary => return None,
         })
     }
 
@@ -421,15 +492,18 @@ impl Row {
                 | Row::UpcomingSeparator
                 | Row::MeetingStatus
                 | Row::StopMeeting
+                | Row::MuteMeeting
                 | Row::CopySection
                 | Row::RecordMeeting
                 | Row::MeetingSeparator
                 | Row::PauseHex
+                | Row::Annotate
                 | Row::CopyLastDictationAudio
                 | Row::CopyRecentDictation
                 | Row::CopyLastMeetingTranscript
                 | Row::RestoreCapture
                 | Row::PlannerSteps
+                | Row::Vocabulary
         )
     }
 }
@@ -481,19 +555,6 @@ fn menu_key(label: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// A menu label in the interface language: macOS's title case in English
-/// (`title`), else the window's sentence-case label translated, with the
-/// title's trailing `…` kept.
-fn label(title: &str, translated: &str) -> String {
-    if crate::desktop::i18n::english() {
-        return title.into();
-    }
-    match title.strip_suffix('…') {
-        Some(_) if !translated.ends_with('…') => format!("{translated}…"),
-        _ => translated.into(),
-    }
-}
-
 /// The Speech Model submenu's fixed items, with their titles.
 fn no_models() -> String {
     tr("No downloaded models").into()
@@ -525,12 +586,15 @@ struct StatusItemController {
     meeting_status: Retained<NSMenuItem>,
     meeting_start: Retained<NSMenuItem>,
     meeting_stop: Retained<NSMenuItem>,
+    meeting_mute: Retained<NSMenuItem>,
     meeting_copy_last: Retained<NSMenuItem>,
     meeting_sections: Retained<NSMenuItem>,
     meeting_sections_menu: Retained<NSMenu>,
     meeting_section_labels: RefCell<Vec<String>>,
     meeting_separator: Retained<NSMenuItem>,
     meeting_button: RefCell<(String, bool)>,
+    annotate: Retained<NSMenuItem>,
+    annotate_state: RefCell<(String, Option<KeyEquivalent>)>,
     paste_last: Retained<NSMenuItem>,
     paste_last_key: RefCell<Option<KeyEquivalent>>,
     copy_last_dictation_audio: Retained<NSMenuItem>,
@@ -548,6 +612,10 @@ struct StatusItemController {
     upcoming_meetings: RefCell<Vec<Option<CalendarMeeting>>>,
     restore_capture: Retained<NSMenuItem>,
     planner_steps: Retained<NSMenuItem>,
+    /// The row and the term items its menu-open refresh rebuilds
+    /// (Labs › Vocabulary menu).
+    vocabulary: Retained<NSMenuItem>,
+    vocabulary_menu: Retained<NSMenu>,
     update: Option<Retained<NSMenuItem>>,
     update_title: RefCell<String>,
     _menu: Retained<NSMenu>,
@@ -583,12 +651,20 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
     );
     let models = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Speech Model"));
     models.setAutoenablesItems(false);
+    let vocabulary = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Vocabulary"));
+    vocabulary.setAutoenablesItems(false);
     let model_items = MODELS
         .iter()
         .enumerate()
         .filter(|(_, model)| model.available())
         .map(|(index, model)| {
-            let item = add_item(&models, &target, model.name, sel!(selectModel:), mtm);
+            let item = add_item(
+                &models,
+                &target,
+                model.name.as_ref(),
+                sel!(selectModel:),
+                mtm,
+            );
             item.setTag(index as isize);
             item.setHidden(true);
             (model.id, item)
@@ -638,6 +714,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
                         Row::CopySection => item.setSubmenu(Some(&meeting_sections_menu)),
                         Row::CopyRecentDictation => item.setSubmenu(Some(&recent_menu)),
                         Row::SpeechModel => item.setSubmenu(Some(&models)),
+                        Row::Vocabulary => item.setSubmenu(Some(&vocabulary)),
                         _ => {}
                     }
                     item
@@ -697,12 +774,15 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
             meeting_status: row(Row::MeetingStatus),
             meeting_start: row(Row::RecordMeeting),
             meeting_stop: row(Row::StopMeeting),
+            meeting_mute: row(Row::MuteMeeting),
             meeting_copy_last: row(Row::CopyLastMeetingTranscript),
             meeting_sections: row(Row::CopySection),
             meeting_sections_menu,
             meeting_section_labels: RefCell::new(Vec::new()),
             meeting_separator: row(Row::MeetingSeparator),
             meeting_button: RefCell::new((String::new(), false)),
+            annotate: row(Row::Annotate),
+            annotate_state: RefCell::new((annotate_title(false), None)),
             paste_last: row(Row::PasteLast),
             paste_last_key: RefCell::new(None),
             copy_last_dictation_audio: row(Row::CopyLastDictationAudio),
@@ -718,6 +798,8 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
             upcoming_meetings: RefCell::new(Vec::new()),
             restore_capture: row(Row::RestoreCapture),
             planner_steps: row(Row::PlannerSteps),
+            vocabulary: row(Row::Vocabulary),
+            vocabulary_menu: vocabulary,
             update: (!update_managed).then(|| row(Row::Update)),
             update_title: RefCell::new(Row::Update.title().unwrap_or_default()),
             _menu: menu,
@@ -823,7 +905,7 @@ pub fn update_transcription(settings: &AppSettings, status: &PreparationStatus) 
                 .model_preparing
                 .setTitle(&NSString::from_str(&tr_fill(
                     "Preparing {}…",
-                    crate::transcription::models::definition(model).name,
+                    &crate::transcription::models::definition(model).name,
                 )));
         }
         controller.model_error.setHidden(status.error.is_none());
@@ -837,6 +919,9 @@ struct MeetingMenu {
     recording: bool,
     can_start: bool,
     can_stop: bool,
+    /// Labs › Mute the microphone while recording: the row's title while it
+    /// shows, which is only while a recording runs with the lab on.
+    mute: Option<String>,
     /// One Copy Section item per live chapter.
     sections: Vec<String>,
 }
@@ -850,14 +935,41 @@ fn meeting_menu(state: &crate::meeting::watcher::MeetingMenuState, enabled: bool
             recording: false,
             can_start: enabled,
             can_stop: false,
+            mute: None,
             sections: Vec::new(),
         },
-        MeetingMenuState::Starting => MeetingMenu {
-            status: Some(tr("Starting meeting recording…").into()),
+        // A stop asked while the recorder starts keeps Record disabled and
+        // says so, exactly as the tray's Stopping item does.
+        MeetingMenuState::Starting { stopping } => MeetingMenu {
+            status: Some(if *stopping {
+                tr("Stopping…").into()
+            } else {
+                tr("Starting meeting recording…").into()
+            }),
             button_title: String::new(),
             recording: true,
             can_start: false,
             can_stop: false,
+            mute: None,
+            sections: Vec::new(),
+        },
+        // A stop already went to the recorder: Stop hides, Record stays
+        // disabled, and the elapsed time holds until the transcription row
+        // takes over (as the tray's Stopping item does).
+        MeetingMenuState::Recording {
+            started,
+            stopping: true,
+            ..
+        } => MeetingMenu {
+            status: Some(tr("Stopping…").into()),
+            button_title: format!(
+                " {}",
+                crate::meeting::format_duration(started.elapsed().as_millis() as u64)
+            ),
+            recording: true,
+            can_start: false,
+            can_stop: false,
+            mute: None,
             sections: Vec::new(),
         },
         MeetingMenuState::Recording {
@@ -869,16 +981,25 @@ fn meeting_menu(state: &crate::meeting::watcher::MeetingMenuState, enabled: bool
         } => {
             let elapsed = crate::meeting::format_duration(started.elapsed().as_millis() as u64);
             let mut status = format!("{} · {} · {elapsed}", tr("Recording"), menu_title(title));
-            if warning.is_some() {
+            // Labs › Mute the microphone while recording says so in place of
+            // the silence warning, which the microphone's own track no longer
+            // shows while Hex leaves it out.
+            let muted = crate::meeting::microphone_muted();
+            if muted {
+                status.push_str(" · ");
+                status.push_str(tr("Microphone muted"));
+            } else if warning.is_some() {
                 status.push_str(" · ");
                 status.push_str(tr("Microphone is silent"));
             }
+            let mute = crate::labs::meeting_microphone_mute().then(mute_title);
             MeetingMenu {
                 status: Some(status),
                 button_title: format!(" {elapsed}"),
                 recording: true,
                 can_start: false,
                 can_stop: true,
+                mute,
                 sections: chapters
                     .iter()
                     .map(|chapter| {
@@ -897,6 +1018,7 @@ fn meeting_menu(state: &crate::meeting::watcher::MeetingMenuState, enabled: bool
             recording: false,
             can_start: false,
             can_stop: false,
+            mute: None,
             sections: Vec::new(),
         },
     }
@@ -908,6 +1030,17 @@ fn icon_shown(hide: bool, meeting_active: bool) -> bool {
     !hide || meeting_active
 }
 
+/// Labs › Mute the microphone while recording's row: choosing it does what
+/// the title says. Its title follows the switch itself, so a lab turned off
+/// under a muted recording reads Mute Microphone again as the row goes.
+fn mute_title() -> String {
+    if crate::meeting::microphone_muted() {
+        label("Unmute Microphone", tr("Unmute microphone"))
+    } else {
+        label("Mute Microphone", tr("Mute microphone"))
+    }
+}
+
 /// Labs › Pause from menu bar's row: Pause Hex while shortcuts run, Resume
 /// Hex while they are paused or a resume waits for a neutral keyboard.
 fn pause_title(suspended: bool) -> String {
@@ -915,6 +1048,39 @@ fn pause_title(suspended: bool) -> String {
         tr("Resume Hex").into()
     } else {
         tr("Pause Hex").into()
+    }
+}
+
+fn annotate_title(recording: bool) -> String {
+    if recording {
+        label("Stop Annotating", tr("Stop annotating"))
+    } else {
+        label("Annotate", tr("Annotate"))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct AnnotateMenu {
+    shown: bool,
+    title: String,
+    key: Option<KeyEquivalent>,
+}
+
+fn annotate_menu(settings: &AppSettings, scrawl_running: bool, recording: bool) -> AnnotateMenu {
+    #[cfg(hex_capture)]
+    let shown = !crate::policy::Policy::current().locks(crate::policy::Lock::Annotate)
+        && (recording || (settings.capture.enabled && !scrawl_running));
+    #[cfg(not(hex_capture))]
+    let shown = {
+        let _ = (settings, scrawl_running, recording);
+        false
+    };
+    AnnotateMenu {
+        shown,
+        title: annotate_title(recording),
+        key: shown
+            .then(|| paste_last_key(Some(&settings.capture.hotkey)))
+            .flatten(),
     }
 }
 
@@ -936,6 +1102,85 @@ const RECENT_DICTATIONS: usize = 5;
 /// cut like a meeting title.
 fn recent_title(text: &str) -> String {
     menu_title(&text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// How many saved terms the Vocabulary submenu lists.
+const VOCABULARY_TERMS: usize = 5;
+
+/// What the Vocabulary submenu lists from the saved terms: the newest five,
+/// newest first, one menu line each.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct VocabularyList {
+    terms: Vec<String>,
+}
+
+fn vocabulary_list(entries: &[VocabularyEntry]) -> VocabularyList {
+    VocabularyList {
+        terms: entries
+            .iter()
+            .rev()
+            .take(VOCABULARY_TERMS)
+            .map(|entry| recent_title(&entry.term))
+            .collect(),
+    }
+}
+
+fn add_vocabulary_term() -> String {
+    label("Add Term…", tr("Add term"))
+}
+
+fn open_vocabulary() -> String {
+    label("Open Vocabulary…", tr("Open vocabulary"))
+}
+
+/// Rebuilds the Vocabulary submenu as the menu opens: Add term…, the last
+/// saved terms newest first, and Open vocabulary…, with no separator while
+/// the list is empty. The saved list is read only while Labs › Vocabulary
+/// menu is on; the row stays hidden while it is off.
+fn refresh_vocabulary() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let shown = crate::labs::vocabulary_menu();
+    let list = if shown {
+        vocabulary_list(&crate::dictation::vocabulary::entries())
+    } else {
+        VocabularyList::default()
+    };
+    STATUS_ITEM.with(|controller| {
+        let controller = controller.borrow();
+        let Some(controller) = controller.as_ref() else {
+            return;
+        };
+        controller.vocabulary.setHidden(!shown);
+        if !shown {
+            return;
+        }
+        let menu = &controller.vocabulary_menu;
+        menu.removeAllItems();
+        add_item(
+            menu,
+            &controller.target,
+            &add_vocabulary_term(),
+            sel!(addVocabularyTerm:),
+            mtm,
+        );
+        if !list.terms.is_empty() {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            for term in &list.terms {
+                let item = plain_item(term, mtm);
+                item.setEnabled(false);
+                menu.addItem(&item);
+            }
+        }
+        add_item(
+            menu,
+            &controller.target,
+            &open_vocabulary(),
+            sel!(openVocabulary:),
+            mtm,
+        );
+    });
 }
 
 /// Rebuilds Copy Recent Dictation as the menu opens. History is read only
@@ -1011,12 +1256,11 @@ fn refresh_copy_dictation_audio() {
 /// is on (the row is hidden otherwise) and the newest History entry that
 /// kept its audio still has its WAV.
 fn copy_last_dictation_audio_enabled() -> bool {
-    crate::labs::copy_dictation_audio()
-        && crate::labs::keep_recordings()
-        && crate::macos_rune::runtime()
-            .and_then(|runtime| runtime.history())
-            .and_then(|history| history.newest_recording(crate::history::now_ms()))
-            .is_some()
+    crate::macos_rune::runtime()
+        .and_then(|runtime| runtime.history())
+        .as_ref()
+        .and_then(crate::history::recordings::newest_copyable)
+        .is_some()
 }
 
 /// Shows Restore Last Capture while Labs › Screenshots is on, as the menu
@@ -1043,63 +1287,6 @@ fn refresh_planner_steps() {
                 .setState(if pinned { 1 } else { 0 });
         }
     });
-}
-
-/// Labs › Upcoming meetings in menu bar's section, refreshed on the meeting
-/// tick and as the menu opens. It only formats the meeting controller's last
-/// calendar read: EventKit is never touched here.
-pub fn update_calendar_menu() {
-    refresh_upcoming();
-}
-
-fn refresh_upcoming() {
-    let section = crate::calendar_menu::section(crate::calendar::wall_clock_ms());
-    STATUS_ITEM.with(|controller| {
-        let controller = controller.borrow();
-        let Some(controller) = controller.as_ref() else {
-            return;
-        };
-        let Some(rows) = section else {
-            hide_upcoming(controller);
-            return;
-        };
-        let labels = rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>();
-        let meetings = rows.into_iter().map(|row| row.meeting).collect::<Vec<_>>();
-        let unchanged = {
-            let current_labels = controller.upcoming_labels.borrow();
-            let current_meetings = controller.upcoming_meetings.borrow();
-            *current_labels == labels && *current_meetings == meetings
-        };
-        controller.upcoming_header.setHidden(false);
-        controller.upcoming_separator.setHidden(false);
-        controller.upcoming_empty.setHidden(!labels.is_empty());
-        if unchanged {
-            return;
-        }
-        for (index, item) in controller.upcoming_slots.iter().enumerate() {
-            item.setHidden(index >= labels.len());
-            if let Some(label) = labels.get(index) {
-                item.setTitle(&NSString::from_str(label));
-            }
-        }
-        // Assign after every AppKit call: no `RefCell` borrow is held across
-        // one, so a menu callback can read the shown rows meanwhile.
-        *controller.upcoming_labels.borrow_mut() = labels;
-        *controller.upcoming_meetings.borrow_mut() = meetings;
-    });
-}
-
-/// Hides the section and forgets what it showed, so showing it again writes
-/// every row anew.
-fn hide_upcoming(controller: &StatusItemController) {
-    controller.upcoming_header.setHidden(true);
-    controller.upcoming_empty.setHidden(true);
-    controller.upcoming_separator.setHidden(true);
-    for item in &controller.upcoming_slots {
-        item.setHidden(true);
-    }
-    controller.upcoming_labels.borrow_mut().clear();
-    controller.upcoming_meetings.borrow_mut().clear();
 }
 
 /// Shows Pause Hex while Labs › Pause from menu bar is on, reads Resume Hex
@@ -1134,51 +1321,68 @@ fn restore_capture_enabled() -> bool {
 }
 
 fn update_title(status: &crate::desktop::host::DesktopUpdateStatus) -> String {
-    use crate::desktop::host::DesktopUpdateStatus;
-    match status {
-        DesktopUpdateStatus::ReadyToRestart => label("Restart to Update", tr("Restart to update")),
-        DesktopUpdateStatus::Available => label("Download Update…", tr("Download update")),
-        DesktopUpdateStatus::SwitchAvailable { channel, version } => {
-            format!("{}…", crate::updater::switch_label(channel, version))
-        }
-        _ => label("Check for Updates…", tr("Check for updates")),
-    }
+    crate::updater::menu_title(status)
 }
 
 /// While a meeting records, the updater refuses Restart to update, so the
 /// item that would ask for it is dimmed instead. Every other update row
 /// (Check for updates, Download update, a channel switch) stays usable.
 fn update_enabled(recording: bool, status: &crate::desktop::host::DesktopUpdateStatus) -> bool {
-    !(recording
-        && matches!(
-            status,
-            crate::desktop::host::DesktopUpdateStatus::ReadyToRestart
-        ))
+    crate::updater::offer_hold(status, recording).is_none()
+}
+
+fn apply_key_equivalent(item: &NSMenuItem, key: Option<&KeyEquivalent>) {
+    let (equivalent, modifiers) = key
+        .map(|key| (key.key.as_str(), key.modifiers))
+        .unwrap_or(("", NSEventModifierFlags::empty()));
+    item.setKeyEquivalent(&NSString::from_str(equivalent));
+    item.setKeyEquivalentModifierMask(modifiers);
+}
+
+/// Shows Annotate (or Stop Annotating while recording) with its shortcut
+/// while Annotate is on and Scrawl.app is not owning it.
+pub fn update_annotate(settings: &AppSettings) {
+    #[cfg(hex_capture)]
+    let (scrawl_running, recording) = (
+        crate::capture_host::scrawl_running(),
+        crate::capture_host::snapshot().recording.is_some(),
+    );
+    #[cfg(not(hex_capture))]
+    let (scrawl_running, recording) = (false, false);
+    let menu = annotate_menu(settings, scrawl_running, recording);
+    STATUS_ITEM.with(|c| {
+        let c = c.borrow();
+        let Some(c) = c.as_ref() else { return };
+        c.annotate.setHidden(!menu.shown);
+        let mut state = c.annotate_state.borrow_mut();
+        if state.0 != menu.title {
+            c.annotate.setTitle(&NSString::from_str(&menu.title));
+            state.0 = menu.title;
+        }
+        if state.1 != menu.key {
+            apply_key_equivalent(&c.annotate, menu.key.as_ref());
+            state.1 = menu.key;
+        }
+    });
+}
+
+fn refresh_annotate() {
+    if let Some(published) = crate::macos_rune::runtime().and_then(|r| r.published()) {
+        update_annotate(&published.settings);
+    }
 }
 
 /// Shows the saved Paste Last binding beside Paste Last Dictation, or
 /// nothing when it is unbound.
 pub fn update_paste_last(settings: &AppSettings) {
     let key = paste_last_key(settings.paste_last_hotkey.as_ref());
-    STATUS_ITEM.with(|controller| {
-        let controller = controller.borrow();
-        let Some(controller) = controller.as_ref() else {
-            return;
-        };
-        if *controller.paste_last_key.borrow() == key {
-            return;
+    STATUS_ITEM.with(|c| {
+        let c = c.borrow();
+        let Some(c) = c.as_ref() else { return };
+        if *c.paste_last_key.borrow() != key {
+            apply_key_equivalent(&c.paste_last, key.as_ref());
+            c.paste_last_key.replace(key);
         }
-        let (equivalent, modifiers) = key
-            .as_ref()
-            .map(|key| (key.key.as_str(), key.modifiers))
-            .unwrap_or(("", NSEventModifierFlags::empty()));
-        controller
-            .paste_last
-            .setKeyEquivalent(&NSString::from_str(equivalent));
-        controller
-            .paste_last
-            .setKeyEquivalentModifierMask(modifiers);
-        controller.paste_last_key.replace(key);
     });
 }
 
@@ -1223,6 +1427,10 @@ pub fn update_meeting(state: &crate::meeting::watcher::MeetingMenuState, enabled
         controller.meeting_copy_last.setHidden(!visible);
         controller.meeting_start.setHidden(!menu.can_start);
         controller.meeting_stop.setHidden(!menu.can_stop);
+        controller.meeting_mute.setHidden(menu.mute.is_none());
+        if let Some(title) = &menu.mute {
+            controller.meeting_mute.setTitle(&NSString::from_str(title));
+        }
         controller.meeting_status.setHidden(menu.status.is_none());
         controller
             .meeting_sections
@@ -1275,15 +1483,17 @@ mod tests {
         assert!(idle.can_start && !idle.can_stop && idle.status.is_none());
         assert!(!meeting_menu(&MeetingMenuState::Idle, false).can_start);
         let started = std::time::Instant::now() - std::time::Duration::from_secs(754);
-        let recording_state = |title: &str, chapters, warning| MeetingMenuState::Recording {
-            started,
-            id: "1".into(),
-            title: title.into(),
-            chapters,
-            warning,
-        };
+        let recording_state =
+            |title: &str, chapters, warning, stopping| MeetingMenuState::Recording {
+                started,
+                id: "1".into(),
+                title: title.into(),
+                chapters,
+                warning,
+                stopping,
+            };
         let recording = meeting_menu(
-            &recording_state("Zoom call — 2:30 PM", Vec::new(), None),
+            &recording_state("Zoom call — 2:30 PM", Vec::new(), None, false),
             false,
         );
         assert_eq!(
@@ -1295,6 +1505,7 @@ mod tests {
                 "A very long provisional title that keeps going past the limit",
                 Vec::new(),
                 None,
+                false,
             ),
             false,
         );
@@ -1310,6 +1521,7 @@ mod tests {
                 "Team sync",
                 Vec::new(),
                 Some(crate::meeting::TrackWarning::DigitalSilence),
+                false,
             ),
             false,
         );
@@ -1327,6 +1539,7 @@ mod tests {
                 "Team sync",
                 vec![chapter("Image storage", 0), chapter("Motion lint", 190_000)],
                 None,
+                false,
             ),
             false,
         );
@@ -1340,6 +1553,12 @@ mod tests {
             transcribing.status.as_deref(),
             Some("Transcribing meeting…")
         );
+        // A stop under way keeps the recording visible with no Record and no
+        // Stop until the transcription row takes over.
+        let stopping = meeting_menu(&recording_state("Team sync", Vec::new(), None, true), true);
+        assert!(!stopping.can_start && !stopping.can_stop);
+        assert!(stopping.recording);
+        assert_eq!(stopping.status.as_deref(), Some("Stopping…"));
     }
 
     #[test]
@@ -1361,10 +1580,12 @@ mod tests {
                 "—".into(),
                 "Recording".into(),
                 "Stop & Transcribe".into(),
+                "Mute Microphone".into(),
                 "Copy Section".into(),
                 "Record Meeting".into(),
                 "—".into(),
                 "Pause Hex".into(),
+                "Annotate".into(),
                 "Paste Last Dictation".into(),
                 "Copy Last Dictation Audio".into(),
                 "Copy Recent Dictation".into(),
@@ -1372,6 +1593,7 @@ mod tests {
                 "Restore Last Capture".into(),
                 "Today’s Steps".into(),
                 "Speech Model".into(),
+                "Vocabulary".into(),
                 "—".into(),
                 "Settings…".into(),
                 "Check for Updates…".into(),
@@ -1385,7 +1607,7 @@ mod tests {
         for row in ROWS {
             let opens_submenu = matches!(
                 row,
-                Row::CopySection | Row::CopyRecentDictation | Row::SpeechModel
+                Row::CopySection | Row::CopyRecentDictation | Row::SpeechModel | Row::Vocabulary
             );
             let informational = matches!(row, Row::UpcomingHeader | Row::UpcomingEmpty);
             assert_eq!(
@@ -1417,6 +1639,30 @@ mod tests {
         assert_eq!(menu_key("F99"), None);
     }
 
+    #[cfg(hex_capture)]
+    #[test]
+    fn annotate_menu_shows_shortcut_when_enabled_and_hides_for_scrawl() {
+        let mut settings = AppSettings::default();
+        settings.capture.enabled = true;
+        let idle = annotate_menu(&settings, false, false);
+        assert!(idle.shown);
+        assert_eq!(idle.title, "Annotate");
+        let key = idle.key.expect("default ⌥⇧S key equivalent");
+        assert_eq!(key.key, "s");
+        assert_eq!(
+            key.modifiers,
+            NSEventModifierFlags::Option | NSEventModifierFlags::Shift
+        );
+
+        let recording = annotate_menu(&settings, false, true);
+        assert!(recording.shown);
+        assert_eq!(recording.title, "Stop Annotating");
+
+        assert!(!annotate_menu(&settings, true, false).shown);
+        settings.capture.enabled = false;
+        assert!(!annotate_menu(&settings, false, false).shown);
+    }
+
     #[test]
     fn a_hidden_icon_comes_back_while_a_meeting_is_under_way() {
         assert!(icon_shown(false, false));
@@ -1436,6 +1682,7 @@ mod tests {
             title: "Team sync".into(),
             chapters: Vec::new(),
             warning: None,
+            stopping: false,
         };
 
         i18n::apply(Some("en"));
@@ -1498,6 +1745,36 @@ mod tests {
         );
         assert_eq!(long, "A long dictation that goes on and on well past…");
         assert_eq!(long.chars().count(), 47);
+    }
+
+    #[test]
+    fn vocabulary_lists_the_last_five_terms_newest_first() {
+        let entry = |term: &str| VocabularyEntry {
+            term: term.into(),
+            sounds_like: Vec::new(),
+        };
+        let entries: Vec<_> = ["one", "two", "three", "four", "five", "six"]
+            .into_iter()
+            .map(entry)
+            .collect();
+        assert_eq!(
+            vocabulary_list(&entries).terms,
+            ["six", "five", "four", "three", "two"]
+        );
+        assert!(vocabulary_list(&[]).terms.is_empty());
+        assert_eq!(
+            vocabulary_list(&[entry(
+                "  A very long term that goes on and on well past one menu line  "
+            )])
+            .terms,
+            ["A very long term that goes on and on well past…"]
+        );
+        assert_eq!(
+            vocabulary_list(&[entry("Dax   Inc.\n")]).terms,
+            ["Dax Inc."]
+        );
+        assert_eq!(add_vocabulary_term(), "Add Term…");
+        assert_eq!(open_vocabulary(), "Open Vocabulary…");
     }
 
     #[test]

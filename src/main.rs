@@ -8,6 +8,10 @@ const VERSION: &str = env!("HEX_BUILD_VERSION");
 
 #[cfg(target_os = "macos")]
 mod accessibility;
+/// The Annotate pane's Agents section: the hex-annotate skill in coding
+/// agents' folders and hex on PATH (`capture.agents`).
+#[cfg(hex_capture)]
+mod agent_install;
 mod app_paths;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod app_settings;
@@ -28,8 +32,8 @@ mod caps_lock_dictation;
 mod capture_host;
 #[cfg(hex_capture)]
 mod capture_zip;
-/// The macOS and Windows paste continuation; Linux does not join yet.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg(target_os = "macos")]
+mod codesign;
 mod continuation;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod control;
@@ -57,10 +61,11 @@ mod macos_rune;
 mod meeting;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod microphone_activity;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod middle_mouse_dictation;
 mod net;
 #[cfg(target_os = "macos")]
 mod parakeet;
-#[cfg(target_os = "macos")]
 mod paste;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod personal_commands;
@@ -98,6 +103,7 @@ use color_eyre::eyre::eyre;
 #[command(
     name = "hex",
     version = crate::VERSION,
+    long_version = option_env!("HEX_LOCAL_LONG_VERSION"),
     about = "Local, observable voice control",
     long_about = "Local, observable voice control.\n\n\
         Control commands (status, dictation, meetings record, settings, model, window, …) drive \
@@ -228,33 +234,15 @@ enum DevCommand {
     /// Render offline audio through the Hex Microphone voice filter.
     VoiceFilter {
         #[command(subcommand)]
-        command: VoiceFilterCommand,
+        command: control::developer_control::VoiceFilterCommand,
     },
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Subcommand)]
-enum VoiceFilterCommand {
-    /// Apply a voice-filter mode across one or more dictation spans in a WAV file.
-    Render {
-        /// Input WAV path (16-bit PCM or 32-bit float).
-        input: PathBuf,
-        /// Voice filter mode id (muffled, muted, quiet, normal, chipmunk, robot, walkie, underwater, far).
-        #[arg(long, default_value = "muffled")]
-        mode: String,
-        /// Optional JSON mode spec override (matching presets.json).
-        #[arg(long)]
-        params: Option<String>,
-        /// Dictation span(s) in milliseconds, e.g. `1000-3500`.
-        #[arg(long = "dictation")]
-        dictation: Vec<String>,
-        /// Effect strength (`0.0` to `1.0`).
-        #[arg(long, default_value_t = 1.0)]
-        strength: f64,
-        /// Output WAV path.
-        #[arg(short = 'o', long = "output")]
-        output: PathBuf,
-    },
+    /// Read a call app's windows through Accessibility and report what is there.
+    #[command(
+        name = "call-window",
+        long_about = accessibility::probe::cli::ABOUT,
+        hide = !dev_build::is_dev_build()
+    )]
+    CallWindow(accessibility::probe::cli::Args),
 }
 
 #[cfg(debug_assertions)]
@@ -366,29 +354,16 @@ fn main() -> Result<()> {
         }
         _ => {}
     }
-    if let Some(Command::Dev {
-        command:
-            DevCommand::VoiceFilter {
-                command:
-                    VoiceFilterCommand::Render {
-                        input,
-                        mode,
-                        params,
-                        dictation,
-                        strength,
-                        output,
-                    },
-            },
-    }) = &cli.command
-    {
-        return audio::voice_filter::render_wav_command(
-            input,
-            mode,
-            params.as_deref(),
-            dictation,
-            *strength,
-            output,
-        );
+    // `hex dev` commands that run here: no data folder, log, lock, or
+    // settings (call-window asks the running Hex and writes one file).
+    match &cli.command {
+        Some(Command::Dev {
+            command: DevCommand::VoiceFilter { command },
+        }) => return command.run(),
+        Some(Command::Dev {
+            command: DevCommand::CallWindow(arguments),
+        }) => return accessibility::probe::cli::run(arguments, Cli::command),
+        _ => {}
     }
     // A headless render (`hex app -- --snap …`) draws fixtures: no data
     // folder, log, lock, or settings, so it never touches the user's Hex.
@@ -468,7 +443,9 @@ fn main() -> Result<()> {
                         println!("{}", bundle.display());
                         return Ok(());
                     }
-                    DevCommand::VoiceFilter { .. } => unreachable!("handled before startup"),
+                    DevCommand::VoiceFilter { .. } | DevCommand::CallWindow(_) => {
+                        unreachable!("handled before startup")
+                    }
                 };
                 let reply = local_api::call_developer(&command)?;
                 if let DeveloperReply::Error { code, message } = &reply {
@@ -480,7 +457,9 @@ fn main() -> Result<()> {
             #[cfg(not(debug_assertions))]
             {
                 match command {
-                    DevCommand::VoiceFilter { .. } => unreachable!("handled before startup"),
+                    DevCommand::VoiceFilter { .. } | DevCommand::CallWindow(_) => {
+                        unreachable!("handled before startup")
+                    }
                 }
             }
         }
@@ -495,6 +474,7 @@ fn main() -> Result<()> {
                     ..Default::default()
                 },
                 &SHUTDOWN,
+                None,
                 None,
             )
             .map(|_| ())
@@ -926,7 +906,7 @@ fn main() -> Result<()> {
     // portal or rtkit.
     // SAFETY: Before any other thread exists to read the environment.
     unsafe { std::env::set_var("DISABLE_RTKIT", "1") };
-    linux::input_route::mark_streams();
+    linux::input::route::mark_streams();
     linux::run(&SHUTDOWN)
 }
 

@@ -51,21 +51,25 @@ pub fn format_length(ms: u64) -> String {
 pub fn parse_clock_ms(input: &str) -> Option<u64> {
     let trimmed = input.trim();
     if let Some((mins, secs)) = trimmed.split_once(':') {
-        let m: u64 = mins.parse().ok()?;
-        let s: f64 = secs.parse().ok()?;
-        if !s.is_finite() || s < 0.0 {
-            return None;
-        }
-        Some(m * 60_000 + (s * 1_000.0).round() as u64)
+        let minutes: u64 = mins.parse().ok()?;
+        let seconds: f64 = secs.parse().ok()?;
+        // Minutes are only bounded by the input, so absurd ones read as no
+        // time instead of overflowing the millisecond clock.
+        minutes
+            .checked_mul(60_000)?
+            .checked_add(seconds_ms(seconds)?)
     } else if let Some(ms_str) = trimmed.strip_suffix("ms") {
         ms_str.trim().parse().ok()
     } else {
-        let s: f64 = trimmed.strip_suffix('s').unwrap_or(trimmed).parse().ok()?;
-        if !s.is_finite() || s < 0.0 {
-            return None;
-        }
-        Some((s * 1_000.0).round() as u64)
+        seconds_ms(trimmed.strip_suffix('s').unwrap_or(trimmed).parse().ok()?)
     }
+}
+
+/// A seconds value as milliseconds, refusing what the clock can't hold: NaN,
+/// infinities, negatives, and anything at or past `u64`'s own range.
+fn seconds_ms(seconds: f64) -> Option<u64> {
+    let ms = (seconds * 1_000.0).round();
+    (ms.is_finite() && ms >= 0.0 && ms < u64::MAX as f64).then_some(ms as u64)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -121,6 +125,10 @@ pub struct ScrawlBundle {
     /// the full frames are kept beside them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autocrop: Option<AutocropInfo>,
+    /// Optional directory of un-inked keyframe plates (`frames-clean/`) for non-destructive ink
+    /// editing after the source movie has been pruned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_frames: Option<String>,
     /// The OpenCode session a Mac capture of a dev site was sent to (`routing`), so `scrawl send`
     /// recovers to the same place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +137,10 @@ pub struct ScrawlBundle {
     /// it recorded no frame: it carries its voice and marks alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_screen: Option<String>,
+    /// Additive v1.x fields written by newer builds (such as non-destructive `inkEdits` layers),
+    /// preserved across destination updates and re-transcription without a v2 format break.
+    #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -586,6 +598,7 @@ pub enum KeyframeReason {
     Laser,
     SceneChange,
     Speech,
+    #[serde(alias = "start")]
     Initial,
 }
 
@@ -638,6 +651,32 @@ mod tests {
             t1,
             name: name.into(),
         }
+    }
+
+    #[test]
+    fn clock_times_parse_and_absurd_minutes_do_not_overflow() {
+        assert_eq!(parse_clock_ms("0:12"), Some(12_000));
+        assert_eq!(parse_clock_ms("1:05"), Some(65_000));
+        assert_eq!(parse_clock_ms("12.5"), Some(12_500));
+        assert_eq!(parse_clock_ms("90s"), Some(90_000));
+        assert_eq!(parse_clock_ms("250ms"), Some(250));
+        assert_eq!(parse_clock_ms("-1"), None);
+        assert_eq!(parse_clock_ms("soon"), None);
+        // NaN, infinities, negatives, and values past the clock's range read
+        // as no time in both branches.
+        assert_eq!(parse_clock_ms("0:1e300"), None);
+        assert_eq!(parse_clock_ms("1e300"), None);
+        assert_eq!(parse_clock_ms("0:NaN"), None);
+        assert_eq!(parse_clock_ms("inf"), None);
+        assert_eq!(parse_clock_ms("0:-1"), None);
+        // Minutes that would overflow the millisecond clock read as no time.
+        assert_eq!(parse_clock_ms(&format!("{}:00", u64::MAX)), None);
+        assert_eq!(parse_clock_ms("184467440737095516:00"), None);
+        assert_eq!(
+            parse_clock_ms("307445734561825:00"),
+            Some(18_446_744_073_709_500_000),
+            "a large time that still fits parses"
+        );
     }
 
     #[test]

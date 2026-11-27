@@ -101,7 +101,7 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "labs.app_model_switching",
         Kind::Bool,
-        "Labs: switch the speech model and language with the foreground application (macOS, Windows)",
+        "Saved opt-in: switch the speech model and language with the foreground application (macOS, Windows)",
     ),
     key(
         "release_microphone_while_idle",
@@ -121,15 +121,15 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "sound_theme",
         Kind::Choice(&[
-            "signature",
             "classic",
+            "signature",
             "click",
             "soft",
             "wood",
             "analog",
             "thock",
         ]),
-        "Which sounds play; classic, Hex's original tones, is the default",
+        "Which sounds play; classic (Classic keys) is the default, signature selects Kalimba",
     ),
     optional(
         "microphone",
@@ -200,6 +200,19 @@ pub(super) const KEYS: &[Key] = &[
          external keyboard (with labs.second_dictation_shortcut; Linux and Windows need a key); \
          none (the default) turns it off",
     ),
+    optional(
+        "model_switch_hotkey",
+        Kind::Shortcut(HotkeySlot::ModelSwitch),
+        "Labs: the shortcut that swaps dictation to the other speech model and language, \
+         and back (with labs.model_switch_shortcut and model_switch_other); none (the \
+         default) turns it off",
+    ),
+    optional(
+        "model_switch_other",
+        Kind::Json,
+        "Labs: the model and language the model switch shortcut swaps to, as \
+         {\"model\": ..., \"language\": ...}; none (the default) has no other model",
+    ),
     key(
         "extra_dictation_hotkeys",
         Kind::Json,
@@ -230,14 +243,66 @@ pub(super) const KEYS: &[Key] = &[
     optional(
         "screenshots.record_hotkey",
         Kind::Shortcut(HotkeySlot::ScreenshotRecord),
-        "Labs: records an area or a window, picked like a screenshot, and press it again \
-         to stop; none (the default) turns it off (macOS, with labs.screenshots and \
-         capture.enabled)",
+        "Labs: opens the recording toolbar (area, window, or full screen, and its audio), \
+         and press it again to stop; command+shift+5 by default, none turns it off (macOS, \
+         with labs.screenshots and capture.enabled)",
     ),
     optional(
         "screenshots.folder",
         Kind::Path,
         "Labs: folder screenshots are saved to; none uses the Desktop (macOS)",
+    ),
+    key(
+        "screenshots.scale_to_1x",
+        Kind::Bool,
+        "Labs: record a Retina display at its size in points, a quarter of the pixels; \
+         on by default (macOS)",
+    ),
+    key(
+        "screenshots.max_resolution",
+        Kind::Choice(&["original", "1440p", "1080p", "720p"]),
+        "Labs: the largest a screen recording is, by its long edge (2560, 1920, or 1280 \
+         pixels); original (the default) keeps its size (macOS)",
+    ),
+    key(
+        "screenshots.frame_rate",
+        Kind::NumberChoice(&["30", "60"]),
+        "Labs: a screen recording's frames a second; 30 by default (macOS)",
+    ),
+    key(
+        "screenshots.quality",
+        Kind::Choice(&["high", "medium", "low"]),
+        "Labs: how much detail a screen recording keeps; high (the default) keeps small \
+         text crisp (macOS)",
+    ),
+    key(
+        "screenshots.export_size",
+        Kind::Choice(&["original", "1080p", "720p"]),
+        "Labs: the size the screenshot editor exports a recording at; original (the \
+         default) copies it as recorded (macOS)",
+    ),
+    optional(
+        "screenshots.export_folder",
+        Kind::Path,
+        "Labs: the folder the screenshot editor's Save panel last saved to; none starts it in \
+         screenshots.folder (macOS)",
+    ),
+    key(
+        "screenshots.record_kind",
+        Kind::Choice(&["area", "window", "screen"]),
+        "Labs: what the recording toolbar records, as last chosen; area by default (macOS)",
+    ),
+    key(
+        "screenshots.record_microphone",
+        Kind::Text,
+        "Labs: the microphone a screen recording keeps: none, default (the one dictation \
+         uses, the default), or an input device's name (macOS)",
+    ),
+    key(
+        "screenshots.record_system_audio",
+        Kind::Bool,
+        "Labs: a screen recording also keeps what the computer plays, through the Screen \
+         Recording grant it already has; off by default (macOS)",
     ),
     key(
         "show_dock_icon",
@@ -293,6 +358,11 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: provisional words beside the HUD while dictating",
     ),
     key(
+        "labs.faster_live_text",
+        Kind::Bool,
+        "Labs: live words with a shorter lookahead, so they appear sooner at a little more GPU work",
+    ),
+    key(
         "labs.failure_notices",
         Kind::Bool,
         "Labs: when a dictation fails, show why for a few seconds beside the HUD",
@@ -303,14 +373,17 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: provisional words in the focused text field as an underlined input-method preedit, and the final text typed there instead of pasted (Linux Wayland)",
     ),
     key(
-        "labs.release_notes_link",
-        Kind::Bool,
-        "Labs: a link to this build's release notes in the sidebar footer",
-    ),
-    key(
         "labs.live_chapters",
         Kind::Bool,
         "Labs: chapter meeting transcripts while recording",
+    ),
+    key(
+        "labs.stop_any_call_recording",
+        Kind::Bool,
+        "Labs: an offered or by-hand call recording stops 30 s after its call app leaves the \
+         microphone and goes quiet, without Stop when the call ends, which keeps governing \
+         Always record; on macOS a calendar reminder's recording stops too; a recording \
+         started by hand watches the one call app on the microphone when it starts",
     ),
     key(
         "labs.playground",
@@ -318,14 +391,25 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: the scene and story browser in the window",
     ),
     key(
-        "labs.vocabulary_biasing",
+        "labs.vocabulary_files",
         Kind::Bool,
-        "Labs: bias Parakeet transcription toward the vocabulary",
+        "Labs: import vocabulary terms from a CSV file in the Vocabulary sheet, and export the list as one",
+    ),
+    key(
+        "labs.vocabulary_menu",
+        Kind::Bool,
+        "Labs: the menu bar's Vocabulary submenu lists the last five saved terms and offers \
+         Add term… and Open vocabulary… (macOS)",
     ),
     key(
         "labs.screen_vocabulary",
         Kind::Bool,
         "Labs: use names and terms visible in the focused window as temporary vocabulary for each dictation (macOS)",
+    ),
+    key(
+        "labs.learn_from_corrections",
+        Kind::Bool,
+        "Labs: add names corrected in text Hex just pasted to Vocabulary, watching only that field for up to 5 minutes; nothing leaves this Mac (macOS)",
     ),
     key(
         "labs.cursor_context",
@@ -393,9 +477,19 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: fix clearly misheard words and spoken self-corrections in each dictation, on this Mac with Apple Intelligence",
     ),
     key(
+        "labs.neutral_voice",
+        Kind::Bool,
+        "Labs: rewrite dictations in chosen modes into plain, neutral wording on this Mac, so your writing style doesn't show (macOS)",
+    ),
+    key(
         "labs.second_dictation_shortcut",
         Kind::Bool,
         "Labs: second_dictation_hotkey dictates like the dictation shortcut",
+    ),
+    key(
+        "labs.model_switch_shortcut",
+        Kind::Bool,
+        "Labs: model_switch_hotkey swaps the dictation model with model_switch_other, and back",
     ),
     key(
         "labs.more_dictation_shortcuts",
@@ -498,6 +592,11 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: a summary of retained dictations at the top of History, with a year-long heatmap and all-time totals from a daily rollup in usage.json (counts only, no text or app names) kept beyond History's retention. While off, the rollup is never written or read; hex history stats prints it too",
     ),
     key(
+        "labs.history_stats_strip",
+        Kind::Bool,
+        "Labs: History draws the Dictation stats dialog's six headline numbers as one compact strip above its list; it needs Labs: history stats and changes nothing else, and off History is exactly as before",
+    ),
+    key(
         "labs.recent_dictations",
         Kind::Bool,
         "Labs: a Copy Recent Dictation submenu in the menu bar that copies one of the last five dictations (macOS)",
@@ -508,14 +607,14 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: hide Hex's menu bar icon while nothing records; shortcuts keep working, and opening Hex again from Finder or Spotlight shows Settings (macOS)",
     ),
     key(
-        "labs.quit_closes_window",
-        Kind::Bool,
-        "Labs: the app menu's Quit Hex (⌘Q) closes the Settings window instead of quitting Hex; dictation keeps running, and the menu bar icon still quits (macOS)",
-    ),
-    key(
         "labs.caps_lock_dictation",
         Kind::Bool,
         "Labs: a Caps Lock press starts and stops dictation hands-free, and its light shows when Hex records and transcribes; Caps Lock stays off so typing is unchanged (macOS)",
+    ),
+    key(
+        "labs.middle_mouse_dictation",
+        Kind::Bool,
+        "Labs: holding the middle mouse button for half a second starts a hands-free dictation and the next long press finishes it; clicks still reach the app, and Escape cancels a hands-free dictation and stays out of the app (macOS)",
     ),
     key(
         "labs.caps_lock_light",
@@ -538,9 +637,32 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: on a screen with a notch, the recording indicator grows out of the notch at either visible position; Hidden still hides it, and flat screens keep the Top or Bottom setting (macOS)",
     ),
     key(
+        "labs.hud_height",
+        Kind::Bool,
+        "Labs: with the HUD position Bottom, the plate sits labs.hud_bottom_gap points above the Dock or the screen's bottom edge, clamped so it stays under the menu bar or notch (macOS)",
+    ),
+    key(
+        "labs.hud_bottom_gap",
+        Kind::Integer {
+            min: 0,
+            max: crate::app_settings::HUD_BOTTOM_GAP_MAX as u64,
+        },
+        "Points the dictation HUD sits above the Dock or the screen's bottom edge at the Bottom position while Labs: HUD height is on; 24 by default, and 0 to 400 (macOS)",
+    ),
+    key(
+        "labs.indicator_follows_mouse",
+        Kind::Bool,
+        "Labs: while a dictation records and processes, the recording indicator sits just below the mouse pointer, or above it near the screen's bottom, and stays inside the screen; Hidden still hides it, and turning it off restores the Top or Bottom position (macOS)",
+    ),
+    key(
         "labs.skip_pauses",
         Kind::Bool,
         "Labs: a dictation transcribed as a whole clip hears only the start and end of each long pause, so slow computers paste sooner (Linux and Windows)",
+    ),
+    key(
+        "labs.voice_isolation",
+        Kind::Bool,
+        "Labs: dictation's microphone opens through Apple's voice processing, so Control Center's Mic Mode can offer Voice Isolation and background noise is reduced; meetings, captures, and the level meter stay on normal capture (macOS)",
     ),
     key(
         "labs.screenshots",
@@ -556,6 +678,16 @@ pub(super) const KEYS: &[Key] = &[
         "labs.copy_capture_zip",
         Kind::Bool,
         "Labs: a finished Annotate capture copies to the clipboard as one light zip file you can attach anywhere, without its video and audio (macOS, Linux, Windows)",
+    ),
+    key(
+        "labs.annotate_agent_tools",
+        Kind::Bool,
+        "Labs: hex annotate inspect, zoom, frames, and skill read a capture bundle in the CLI process, for a coding agent (macOS, Linux, Windows)",
+    ),
+    key(
+        "labs.annotate_agent_install",
+        Kind::Bool,
+        "Labs: Annotate gains an Agents section that writes the hex-annotate skill into Claude Code, Codex, OpenCode, or Pi, copies the npx skills add command, and on macOS links hex onto PATH without replacing another program's hex (macOS, Linux, Windows)",
     ),
     key(
         "labs.gnome_clipboard_restore",
@@ -578,19 +710,34 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: on Wayland desktops without layer-shell, such as GNOME, Annotate's capsule and ink float over the screen through XWayland while it is already running; Esc can't stop drawing there, so use the capsule's pen button or let go of a held Annotate key (Linux)",
     ),
     key(
+        "labs.annotate_pointer_screen",
+        Kind::Bool,
+        "Labs: on Wayland, a screen capture records the monitor under the pointer, and each monitor keeps its own screen-cast choice (Linux)",
+    ),
+    key(
         "labs.meeting_import",
         Kind::Bool,
         "Labs: Meetings offers Import audio…, so a local audio file is transcribed and kept as a meeting (macOS)",
     ),
     key(
+        "labs.transcript_edits",
+        Kind::Bool,
+        "Labs: a saved meeting's transcript offers selecting lines and deleting them, and later summaries, copies, search, and the Markdown file use what's left",
+    ),
+    key(
+        "labs.meeting_microphone_mute",
+        Kind::Bool,
+        "Labs: while a meeting records, Mute microphone leaves Hex's microphone out of the recording and Unmute microphone puts it back; the call's own audio keeps recording and transcribing (macOS)",
+    ),
+    key(
+        "labs.meeting_indicator_display",
+        Kind::Bool,
+        "Labs: the meeting recording indicator stays on the display it was dragged to, in the corner nearest where it was let go, instead of only the primary display (macOS and Windows)",
+    ),
+    key(
         "labs.output_fixes",
         Kind::Bool,
         "Labs: Output's Try card offers Vocabulary and Fix this, which copies an agent prompt naming the wrong result",
-    ),
-    key(
-        "labs.picker_active_first",
-        Kind::Bool,
-        "Labs: the speech model picker lists the model in use first",
     ),
     key(
         "labs.model_in_place",
@@ -606,12 +753,6 @@ pub(super) const KEYS: &[Key] = &[
         "labs.picker_downloaded",
         Kind::Bool,
         "Labs: the speech model picker's All speech models view offers Only downloaded models, with the space they take",
-    ),
-    key(
-        "labs.shell_completions",
-        Kind::Bool,
-        "Labs: hex completions <shell> prints a completion script for bash, zsh, fish, elvish, or \
-         PowerShell, generated from Hex's own commands",
     ),
     key(
         "labs.yolo_mode",
@@ -655,18 +796,6 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: sign in with your team Google account (macOS dev builds)",
     ),
     key(
-        "labs.api_browser_access",
-        Kind::Bool,
-        "Labs: web pages from the origins in labs.api_browser_origins can call Hex's local API \
-         from the browser; every request still needs the API token",
-    ),
-    key(
-        "labs.api_browser_origins",
-        Kind::Json,
-        "Labs: the browser origins allowed to call Hex's local API, as a JSON list of \
-         http:// or https:// scheme://host[:port] origins; an entry that isn't one is ignored",
-    ),
-    key(
         "labs.speakers_only",
         Kind::Bool,
         "Labs: While dictating applies only while the default output is speakers; headphones are \
@@ -693,12 +822,6 @@ pub(super) const KEYS: &[Key] = &[
          Resume; a restart starts unpaused (macOS)",
     ),
     key(
-        "labs.print_start",
-        Kind::Bool,
-        "Labs: `hex dictation start --print` records a dictation whose transcript goes to \
-         that command, never pasted or copied, however the recording ends (macOS)",
-    ),
-    key(
         "labs.voice_prompt",
         Kind::Bool,
         "Labs: a spoken phrase inside a dictation hands the mode's OpenCode model a one-off \
@@ -717,10 +840,63 @@ pub(super) const KEYS: &[Key] = &[
          shortcut were pressed again",
     ),
     key(
+        "labs.confirm_long_cancels",
+        Kind::Bool,
+        "Labs: once a dictation has recorded for 10 seconds, the first cancel press keeps \
+         recording and asks for a second within 3 seconds",
+    ),
+    key(
         "labs.stop_phrase_text",
         Kind::Text,
         "Labs: the phrase that finishes a hands-free dictation, at least two words and six \
          letters; \"stop dictation\" by default",
+    ),
+    key(
+        "labs.signature",
+        Kind::Bool,
+        "Labs: every normal dictation is signed with labs.signature_text on its own line at \
+         the end, before it is pasted, kept in History, and remembered for Paste Last",
+    ),
+    key(
+        "labs.signature_text",
+        Kind::Text,
+        "Labs: the line added to each normal dictation, one line of at most 200 characters; \
+         \"Sent from Hex\" by default, and empty adds nothing",
+    ),
+    key(
+        "labs.clipboard_phrase",
+        Kind::Bool,
+        "Labs: labs.clipboard_phrase_text spoken in a normal dictation becomes the clipboard's \
+         text in double quotes, before it is pasted, kept in History, and remembered for Paste \
+         Last",
+    ),
+    key(
+        "labs.clipboard_phrase_text",
+        Kind::Text,
+        "Labs: the words replaced with the clipboard, at least two words and six letters; \
+         \"my clipboard\" by default",
+    ),
+    key(
+        "labs.dictation_style",
+        Kind::Bool,
+        "Labs: every normal dictation is written as Polished, Casual, Notes, or Verbatim \
+         (labs.dictation_style_choice), like the iPhone app, without an AI model",
+    ),
+    key(
+        "labs.dictation_style_choice",
+        Kind::Choice(&["polished", "casual", "notes", "verbatim"]),
+        "Labs: the style every normal dictation is written as while Labs › Dictation style \
+         is on; polished by default",
+    ),
+    key(
+        "labs.meeting_audio_source",
+        Kind::Bool,
+        "Labs: a meeting's computer audio records one app or one output device instead of every output",
+    ),
+    key(
+        "labs.meeting_audio_source_choice",
+        Kind::Json,
+        "Labs: which source labs.meeting_audio_source records, as \"all\", {\"app\":{id,name}}, or {\"output\":{id,name}}; all by default",
     ),
     key(
         "meetings.enabled",
@@ -753,9 +929,14 @@ pub(super) const KEYS: &[Key] = &[
         "Screen corner of the meeting recording indicator",
     ),
     optional(
+        "meetings.recording_indicator_display",
+        Kind::Text,
+        "The display the meeting recording indicator rests on, named the way the OS names it; none is the primary display",
+    ),
+    optional(
         "meetings.retention",
         Kind::Choice(&["day", "week", "month", "forever"]),
-        "How long finished meetings are kept before they move to the Trash; none keeps new meetings 24 hours and older ones until you choose",
+        "How long finished meetings are kept before they move to the Trash; none keeps new meetings 7 days and older ones until you choose",
     ),
     optional(
         "meetings.audio_retention",
@@ -765,7 +946,7 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "meetings.stop_when_call_ends",
         Kind::Bool,
-        "A meeting recording Hex started on its own stops 30 s after its call app leaves the microphone and goes quiet, unless you keep recording (macOS)",
+        "A meeting recording Hex started on its own stops 30 s after its call app leaves the microphone and goes quiet, unless you keep recording",
     ),
     key(
         "meetings.export.descriptive_filenames",
@@ -780,7 +961,12 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "meetings.providers",
         Kind::Json,
-        "Per-app call choices, as a JSON array of {key, label, policy: ask|always_record|never_offer}",
+        "Per-app call choices, as a JSON array of {key, label, policy: ask|always_record|never_offer} (Ask each time, Always record, Don't offer)",
+    ),
+    key(
+        "meetings.default_policy",
+        Kind::Choice(&["ask", "always_record", "never_offer"]),
+        "What to do when a call starts in a website or app with no entry in meetings.providers: ask (Ask each time), always_record (Always record), or never_offer (Don't offer)",
     ),
     read_only(
         "meetings.calendar.connected",
@@ -856,7 +1042,7 @@ pub(super) const KEYS: &[Key] = &[
     optional(
         "ui_language",
         Kind::Choice(&[
-            "en", "pl", "zh", "zh-Hant", "ja", "de", "es", "uk", "pt", "fr", "ru",
+            "en", "pl", "zh", "zh-Hant", "ja", "de", "es", "uk", "pt", "fr", "ru", "hu",
         ]),
         "Interface language; none follows the system",
     ),
@@ -903,7 +1089,7 @@ pub(super) const CAPTURE_KEYS: &[Key] = &[
     optional(
         "capture.folder",
         Kind::Path,
-        "Folder for new captures; none uses Scrawl's captures folder",
+        "Folder for new captures; none uses the annotations folder in Hex's application data",
     ),
     optional(
         "capture.media_days",
@@ -972,11 +1158,14 @@ pub(super) const NEEDS: &[(&str, &str)] = &[
     ("meetings.calendar.", "calendar"),
     ("meetings.", "meetings"),
     ("labs.live_chapters", "meetings"),
+    ("labs.stop_any_call_recording", "meetings"),
+    ("labs.meeting_microphone_mute", "meetings"),
+    ("labs.meeting_indicator_display", "meetings"),
     ("experimental.hex_microphone", "fun"),
     ("typed_text_hotkey", "typed_text"),
     ("show_dock_icon", "dock_icon"),
     ("labs.hide_menu_bar_icon", "dock_icon"),
-    ("labs.quit_closes_window", "dock_icon"),
+    ("labs.app_model_switching", "app_model_switching"),
     ("keyboard_model_switching.", "keyboard_model_switching"),
     ("enable_on_launch", "listener_control"),
     ("share_dictation_shortcut", "share_shortcut"),

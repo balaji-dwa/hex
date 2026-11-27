@@ -3,9 +3,9 @@
 Record a call locally: Hex captures the other participants (system audio) and
 you (microphone) as separate tracks, transcribes them on this Mac, and saves a
 Markdown transcript with `You` and `Them` turns. Recording starts automatically
-only for calls from a website or app set to Always record, and never stops
-automatically unless Meetings › Settings › Detected calls › Stop when the call
-ends is on (see
+only for calls answered Always record (Meetings › Settings › Calls), and
+never stops automatically unless the Calls sheet's Stop when the call ends is
+on or Labs › Stop every call recording when the call ends is on (see
 [meetings.auto-stop](#record)). This map describes macOS; [Linux and Windows](#linux-and-windows)
 lists where they differ.
 
@@ -28,8 +28,8 @@ Checks: `retention_expires_meetings_by_when_they_ended_and_skips_active_ones`,
 Labs > Meetings switch (macOS)                       // meetings.opt-in; off by default
 ├── Off -> only the Labs switch -> Turn on -> meetings.enabled = true
 ├── On -> Meetings joins the sidebar; header switch Recordings | Settings;
-│   menu-bar items, call detection, Option-Control-V
-│   Settings view: Call recording, After a meeting, Calendar, Detected calls, Advanced ▸
+│   menu-bar items, call detection
+│   Settings view: When a call starts, After a meeting, Export, Advanced ▸
 │   ├── System Audio Recording                  // meetings.permission; asked only now
 │   │   ├── Untrusted row shown / Allow -> retired Hex IDs cleared (`ScreenCapture` + `AudioCapture`)
 │   │   ├── Allow -> macOS prompt the first time (tour's permission_control)
@@ -71,17 +71,47 @@ Labs > Meetings switch (macOS)                       // meetings.opt-in; off by 
 │   │       // meetings-summaries-unavailable, meetings-summary-model
 │   ├── Advanced -> Show recording indicator (on by default; corner-snapping
 │   │   capsule) and the System Audio Recording row once allowed
-│   ├── Calendar -> Connect calendar; reminders before meetings // meetings.calendar
-│   │   ├── Labs › Select all calendars -> one Select all / Deselect all button
-│   │   │   beside the Calendars row // labs.calendar_bulk_select
-│   │   └── Labs › Upcoming meetings in menu bar -> the same meetings in the status menu // labs.calendar_menu
-│   └── Detected calls -> Stop when the call ends (macOS, off;
-│       │   meetings.stop_when_call_ends), then Ask / Always record / Never
-│       │   offer per provider // meetings.policy
-│       ├── Slack huddles, Zoom, Google Meet, Microsoft Teams, FaceTime, WhatsApp,
-│       │   Gather, Discord, Signal, Telegram, WeChat, LINE, Webex, Element,
-│       │   Phone, Google Voice, Messenger, and GroupMe (always listed)
-│       └── then each website or app chosen for from an offer's "…"
+│   └── When a call starts -> the Calls row, then (macOS) Connect calendar
+│       │   and reminders before meetings // meetings.calendar
+│       ├── Calls row -> the answer every call gets ("Ask each time"), the
+│       │   icons of up to four apps and websites with their own answer
+│       │   (then "+N"), and a line naming them ("Slack huddles: Record
+│       │   automatically", or "2 apps and websites answer differently");
+│       │   the whole row opens the Calls sheet // meetings.policy
+│       │   └── Calls sheet
+│       │       ├── When a call starts -> Ask each time (default) / Record
+│       │       │   automatically / Don't offer, each with what it does
+│       │       │   (meetings.default_policy). Choosing one moves every app
+│       │       │   and website that followed the old answer with it.
+│       │       │   └── Stop when the call ends (off;
+│       │       │       meetings.stop_when_call_ends) nests under Record
+│       │       │       automatically while it is the answer or any app or
+│       │       │       website records automatically; its line names the
+│       │       │       grace (AUTO_STOP_GRACE, 30 s). Labs › Stop every call
+│       │       │       recording when the call ends extends the same stop to
+│       │       │       the other recordings (see Record); the two switches are
+│       │       │       separate, and each one alone is enough for its own
+│       │       │       recordings
+│       │       ├── Apps and websites -> every app and website Hex has seen
+│       │       │   a call in, newest first, then those with a saved answer
+│       │       │   it hasn't seen since; each row: icon, name, last seen
+│       │       │   (Today, Yesterday, weekday, else date) and its answer.
+│       │       │   Rows that follow the default read dimmed; Don't offer
+│       │       │   rows stay listed
+│       │       │   └── nothing yet -> "Apps and websites show up here after
+│       │       │       Hex sees a call in them."
+│       │       └── Done / Escape -> close (Escape closes an open row menu
+│       │           first)
+│       │       // checks: the_calls_sheet_saves_the_default_and_each_answer,
+│       │       // an_empty_calls_sheet_says_what_fills_it (tests/panes.rs);
+│       │       // scenes meetings-calls, meetings-calls-empty
+│       ├── Icons: the app's own icon from the application catalog (macOS
+│       │   bundles, Linux .desktop entries, Windows executables), loaded
+│       │   off the UI thread and cached; a website gets its service's
+│       │   mark when known, else a globe; nothing is fetched
+│       ├── Labs › Select all calendars -> one Select all / Deselect all button
+│       │   beside the Calendars row // labs.calendar_bulk_select
+│       └── Labs › Upcoming meetings in menu bar -> the same meetings in the status menu // labs.calendar_menu
 └── Off -> Controller idles; no microphone-activity inspection or shortcut;
            the pane leaves the sidebar
 
@@ -110,6 +140,18 @@ Import audio                                        // Labs › Import audio, of
         ├── Native picker filters WAV, M4A, MP3, AIFF, AIF, and CAF
         ├── Off -> no button, dialog, decoder, or watcher command
         └── see Import Audio (Labs) below
+Delete transcript lines                       // Labs › Delete transcript lines, off by default (every OS)
+        finished meeting detail -> Select lines beside Copy; every turn gets a check column
+        ├── Press a turn (You and Them together) to select every published line
+        │   under it; adjacent same-speaker entries within 3 s coalesce into one
+        │   turn, so the request carries all their (source, start_ms, end_ms) keys
+        ├── The bar counts the turns clicked (Delete 1 line / Delete {n} lines,
+        │   with singular strings for one); Delete lines… only arms, the
+        │   confirmation sends one request, and Escape or Cancel leaves without asking
+        ├── Its summary, provisional title, and chapters are removed with the
+        │   lines, since their stored text came from them; Regenerate summary
+        │   reads the edited transcript
+        └── see Delete transcript lines (Labs) below
 Live transcript scrolling                           // always on (#1332; graduated from Labs)
         while the selected meeting is Starting or Recording (no Stop
         pending), the detail card's scroll sticks to the bottom: new turns
@@ -122,9 +164,12 @@ Requires the selected local dictation model, Microphone, and System Audio
 Recording (the "System Audio Recording Only" list under Privacy & Security ›
 Screen & System Audio Recording; `NSAudioCaptureUsageDescription`). Screen
 Recording alone still works through the ScreenCaptureKit fallback. The opt-in is `meetings.enabled` in `settings.json`, alongside
-`meetings.show_recording_indicator` (default `true`) and
-`meetings.recording_indicator_corner` (default `top_right`)
-([app_settings.rs](../../src/app_settings.rs) `MeetingSettings`). Recording
+`meetings.show_recording_indicator` (default `true`),
+`meetings.recording_indicator_corner` (default `top_right`), and
+`meetings.recording_indicator_display` (only chosen while Labs › Indicator on
+any display is on; left out of the file while the indicator rests on the
+primary display) ([app_settings.rs](../../src/app_settings.rs)
+`MeetingSettings`). Recording
 refuses to start without either grant and asks macOS for System Audio Recording.
 
 ## Linux and Windows
@@ -227,15 +272,65 @@ Call detection                                    // meetings.detect
     by process image name
     └── executables map to the macOS keys (zoom -> us.zoom.xos, chrome ->
         com.google.Chrome, ms-teams.exe -> com.microsoft.teams2, ...)
-Browser calls -> offered as "Call in <browser>": no site is read yet, so a
-    call on any website (Teams on the web, a Teams web app/PWA, Meet, ...) is
-    a browser call after 20 s, never the Microsoft Teams (or other service's)
-    choice; Always record can't be set for it from an offer
-    └── browsers: chrome, chromium, brave, helium (helium-browser), firefox,
-        zen (zen, zen-bin; the Flatpak or tarball build, content processes
-        included), msedge, vivaldi (vivaldi-bin, vivaldi-stable,
-        vivaldi-snapshot; a Vivaldi web app runs in Vivaldi's process);
-        others are not detected (#1105)
+Browser calls -> a browser holding the microphone is a browser call after 20 s
+    ├── browsers: chrome, chromium, brave, helium (helium-browser), firefox,
+    │   zen (zen, zen-bin; the Flatpak or tarball build, content processes
+    │   included), msedge, vivaldi (vivaldi-bin, vivaldi-stable,
+    │   vivaldi-snapshot; a Vivaldi web app runs in Vivaldi's process);
+    │   others are not detected (#1105)
+    ├── Linux -> offered as "<browser> call detected": no site is read yet, so a
+    │   call on any website (Teams on the web, a Teams web app/PWA, Meet, ...)
+    │   is a browser call, never the Microsoft Teams (or other service's)
+    │   choice; Always record isn't offered for it
+    └── Windows -> the microphone-holding browser's visible windows are read
+        through UI Automation, at most six, one read in flight and 2 s for
+        the whole read (a hung provider leaves their titles): a page address
+        or window title naming a call (Meet, a Teams page, ...) offers that
+        service with its site, and Always record follows it like any known
+        call; a page that names no call stays "<browser> call detected"
+        └── the browser executable's windows, not the microphone process's:
+            a Chromium audio utility process has none; each window's search
+            stops at its first Document, so a page's content is not
+            searched, and the whole-window title is reduced to the page's
+            (Edge's profile name, its other-tab count, and the zero-width
+            space in its name removed)
+Stop when the call ends -> the same row and 30 s grace as macOS
+    (meetings.stop_when_call_ends). The call app counts as present while it
+    holds the microphone OR still plays output: Windows any active render
+    session on any output of its processes (IAudioSessionManager2), Linux a
+    running Stream/Output/Audio node of its executable in the same pw-dump
+    graph. A failed read counts as playing, so a muted call is never stopped;
+    on Linux the graph is briefly empty right after its monitor (re)starts,
+    which reads as not playing, harmless because the microphone read is empty
+    too and an absence only counts after 3 s. Windows and macOS skip an
+    individual output, session, or process that can't be read
+    // checks: running_output_streams_say_whether_an_app_still_plays
+    // (microphone_activity/linux.rs); Windows has no automated check
+    ├── not observed on a real muted call on either OS
+    └── A page naming a different call ends the recording after the same
+        grace (#1775) on Windows too, untested there; never on Linux, which
+        reads no site
+Labs › Stop every call recording when the call ends -> the same switch as
+    macOS (labs.stop_any_call_recording, off by default): an offered or
+    by-hand recording stops 3 s after the call app it watches leaves the
+    microphone and goes quiet, then 30 s of grace under the "Hex stops
+    recording in 30 s unless you keep recording" capsule, with Keep
+    recording and the call coming back dropping the stop, even with Stop
+    when the call ends off. There is no calendar here, so no calendar
+    reminder's recording to stop. An offered recording watches the app
+    detection named (a browser holds the microphone until it lets it go;
+    its page is not read for this). A by-hand recording watches the one
+    native call app on the microphone when it starts: the executable names
+    (ms-teams.exe, teams-for-linux, zoom, ...) map to the same canonical
+    keys detection uses, with browsers left out
+    └── On GNOME Wayland without Labs › Call recording controls on GNOME
+        the capsule can't show: an offered call is started with the
+        Meetings pane's Start recording, a by-hand start, so a browser call
+        isn't watched, and a by-hand recording stops about 30 s after its
+        call ends with no Keep recording prompt shown
+    // check: windows_and_linux_executables_link_to_their_canonical_call_app
+    // (meeting/watcher/call_end.rs); not observed on a real Windows or
+    // Linux call
 Permissions -> none asked; the System Audio Recording row is macOS-only
 Calendar -> none (no Connect calendar row)
 Notes and live chapters -> After a meeting › Summaries is a switch (off by
@@ -285,22 +380,228 @@ error showed. Check: `pane_requests_reach_the_window_s_own_meetings` in
 [rune_ui/meetings.rs](../../src/rune_ui/meetings.rs); a Recycle Bin delete on
 a real Windows PC has not been observed.
 
-Not on Linux and Windows yet: the Option-Control-V meeting paste shortcut,
-Copy section from the tray, the `hex meetings` and `hex mcp` commands
-(shared-control), and website names for browser calls. Dragging a capsule to
+Not on Linux yet: website names for browser calls (Windows reads its
+browsers' windows, macOS their tabs). Not on Linux and Windows yet: Copy
+section from the tray (`hex meetings` and `hex mcp` are wired through
+`ControlCli` on every OS). Dragging a capsule to
 another corner works on Windows, on X11 desktops, and on a capsule floated on
 XWayland (GNOME with Labs › Call recording controls on GNOME), though none of
 that has been tried by hand on a real Windows PC or X11 desktop; only a native
 Wayland capsule returns to the corner it started in
 (`primary_screen_size` in
 [rune_ui/meeting_capsules/screen.rs](../../src/rune_ui/meeting_capsules/screen.rs)).
+Every capsule otherwise stays on the primary display, on every OS; Labs ›
+Indicator on any display is the opt-in that lets a release land on the display
+under the pointer (macOS and Windows, `labs.meeting_indicator_display`; see
+[the floating indicator](#record)).
 Verified: Linux and Windows x64 build and lint
 (`cargo clippy`, `cargo xwin clippy`); the single default-output PipeWire
 monitor capture and the pw-dump parsing were checked by hand on Arch/niri
 before #1801. Not verified: the multi-sink capture #1801 added has not been
 run against a real PipeWire session (neither has `target.object` been shown to
 link each `pw-record` to that sink's monitor), a recorded call end to end on
-either OS, Windows loopback and session detection on hardware.
+either OS, Windows loopback and session detection on hardware, the
+audio-output read behind Stop when the call ends (a Windows render session
+and a Linux PipeWire output node on a real muted call), and whether the new
+Teams on Windows may play through msedgewebview2.exe: Hex does not map that
+process to Teams, so its output would not count as playing.
+
+## Choosing meeting audio (Labs)
+
+Labs › Choose meeting audio (`labs.meeting_audio_source`, off by default,
+every OS) adds **Computer audio** to Meetings › Settings: all computer
+audio, one output device, or one app. The
+choice is saved in `labs.meeting_audio_source_choice` as `"all"`,
+`{"app":{"id":…,"name":…}}`, or `{"output":{"id":…,"name":…}}`
+([meeting/audio_source.rs](../../src/meeting/audio_source.rs)). With the lab
+off, the saved choice is ignored and the system track is exactly today's; on
+with All computer audio chosen, it is too. Every OS capture source re-reads
+the effective choice on its 2 s route check: another choice reopens it, and
+Linux follows a chosen app's streams in place, so a choice applies
+mid-recording.
+
+```ts
+Computer audio                                  // labs.meeting_audio_source
+├── all computer audio -> every output, as before
+├── one output -> only that output's monitor, loopback, or device
+│   ├── macOS -> a Core Audio tap on that device's UID, its own aggregate,
+│   │   excluding Hex's own sounds
+│   ├── Windows -> that WASAPI endpoint's cpal loopback, matched by the
+│   │   endpoint id the pane listed; one that isn't listed records silence
+│   ├── Linux -> that sink's monitor, the one the pane listed
+│   └── Windows and Linux record Hex's own sounds played on that output, as
+│       all computer audio does there
+├── one app -> only that app's playback
+│   ├── macOS -> every one of the app's Core Audio process objects, its
+│   │   helpers by canonical bundle id included and whether it plays now or
+│   │   not, so a helper that starts playing is heard without a rebuild;
+│   │   Hex's own audio never
+│   ├── Windows -> WASAPI process loopback of its executable's process tree,
+│   │   such as ms-teams.exe (Windows 10 version 2004 or later); its
+│   │   process-tree roots are looped back once each and mixed, so choosing
+│   │   a launcher such as Chrome, Terminal, or Steam also records every app
+│   │   it launched. The pane names an app by its playing session's process,
+│   │   climbing to a parent only for a known helper of it (a WebView2
+│   │   helper, or the browser's own child sharing its executable) that
+│   │   started first, so new Teams' WebView2 children are Teams and an app
+│   │   Chrome or Hex launched is listed as itself
+│   └── Linux -> its running Stream/Output/Audio nodes in PipeWire, added and
+│       removed as they appear and go
+├── chosen source isn't present -> the system track records silence and keeps
+│   its place on the timeline; the 2 s route check starts recording when it
+│   appears
+│   ├── an app that isn't playing -> silence until it plays
+│   └── an output that was unplugged -> silence until it returns
+├── the choice changes -> the open source reports it on its route check and
+│   reopens with the new choice, so it applies mid-recording
+├── never every output -> a chosen source never falls back to all audio
+└── save -> a malformed or unknown saved value loads as all computer audio,
+    and a saved app or device missing from the list stays the shown choice
+    with "not playing now" or "not connected"
+```
+
+Listing runs off the window thread
+([rune_ui/meetings/audio_source.rs](../../src/rune_ui/meetings/audio_source.rs)):
+Linux reads `pactl -f json list sinks` and the one PipeWire `pw-dump
+--monitor` graph, macOS reads Core Audio process objects and output devices,
+and Windows reads `IAudioSessionManager2` render sessions and cpal's outputs.
+The Meetings row asks again every 3 s while its Settings view shows. An app is
+named on Windows by the process its playing session's helper chain reaches,
+and Hex's own playback and its `pw-cat` children are left out on Linux.
+
+On macOS the choice is a private Core Audio process tap
+([meeting/macos/system_audio.rs](../../src/meeting/macos/system_audio.rs)).
+Every output keeps the global tap that excludes Hex, with ScreenCaptureKit as
+its fallback. One app taps `initMonoMixdownOfProcesses` over every one of
+the chosen app's Core Audio process objects, whether it plays output now or
+not, so a browser's renderers or Teams' and Zoom's helpers are the app, a
+helper that starts playing is heard without rebuilding the tap, and Hex's own
+processes never are. A tap rebuilt for a changed process set first forwards
+the audio it already queued, but the rebuild is not lossless: the audio
+between that queue and the new tap's first IO cycle is lost.
+One output taps `initExcludingProcesses:andDeviceUID:withStream:` with stream
+0, and its private aggregate names that device as its main and clock device
+instead of the default output; the device is not a sub-device, which is what
+left USB interfaces delivering nothing to the IOProc, and a tap-only aggregate
+is built if Core Audio refuses that. A chosen app's process objects, or a
+chosen output's presence, is re-read on the same 2 s route check the default
+output uses and the tap is rebuilt in place when it changes; while nothing
+matches, the source delivers no audio and the track writer pads the gap when
+it returns. A chosen source never falls back to ScreenCaptureKit, which would
+record the whole display, and never widens to all audio: a tap that cannot be
+created fails that stream and the supervisor retries it. A chosen source
+needs System Audio Recording consent for the tap even when Screen Recording
+is granted, since only a process tap records just that app or output; an
+unanswered prompt fails the open, and the supervisor's next open succeeds
+once it is answered. Output devices are listed by
+`kAudioDevicePropertyDeviceUID` with the name Core Audio reports
+(`kAudioObjectPropertyName`), the default first.
+
+On Linux the choice is one `pw-record` for the chosen sink, or one per
+running Stream/Output/Audio node of the chosen app
+([meeting/linux.rs](../../src/meeting/linux.rs)). An app's captures are added
+and removed in place on each 2 s route check, so a stream that opens mid-call
+is heard without the gap a reopened source would leave; each spawned capture
+carries its own generation, and its audio and exit are ignored once its slot
+holds a newer capture, so a stopped stream's buffered packets are never mixed
+into the one that replaced it and its exit never kills that child. While the
+chosen app or sink is absent the source records synthesized silence, which is
+kept out of the digital-silence watch: waiting for a chosen source to return
+is not a stalled stream.
+
+On Windows the choice is read as the system source opens: one output
+opens that endpoint's existing cpal loopback, and a chosen app opens WASAPI
+process loopback (`ActivateAudioInterfaceAsync` on
+`VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`, which converts the app's rate and
+channels into the requested format) for each process-tree root whose
+executable matches the id, mixed into the one track
+([meeting/windows/process_loopback.rs](../../src/meeting/windows/process_loopback.rs)).
+The pane names an app by the process a playing session belongs to: it climbs
+to the parent only when the child is a known helper of that parent
+(`msedgewebview2.exe` under its host app, or a process sharing the browser's
+own executable) and the parent's creation time, from `GetProcessTimes`,
+is earlier than the child's, so a recycled pid cannot stand in for a launcher
+that never started it. Anything else - a game Steam started, a site or PWA
+Chrome opened, a program Terminal or VS Code ran - is listed as its own app,
+so its session is not attributed to the launcher. Recording is by process
+tree, though: choosing a launcher app (Chrome, Terminal, Steam, VS Code)
+also records every app it launched, and choosing the launched app records
+only that app. A WebView2 helper is never attributed to Hex, and Hex's own
+pid is never a capture root. The walk stops at `explorer.exe`,
+`svchost.exe`, `services.exe`, `wininit.exe`, a reserved pid, an exited
+parent, or a cycle. New Teams' `msedgewebview2.exe` children are therefore
+listed and captured as `ms-teams.exe`, a WebView2 tree is not looped back
+per session, and a WebView2 helper with no host in the process list is not
+listed as an app of its own, since capturing `msedgewebview2.exe` would
+record every app that uses WebView2. A chosen output that is unplugged closes
+its loopback and records silence; the 2 s route check opens it again when it
+returns. An app that isn't running, or whose process set changes, is
+re-listed on the same check and reopens then. An app that is running but
+whose roots would not open fails the open, so the supervisor retries with its
+bounded backoff rather than staying silent; once one root records, a root
+that fails to open or whose stream ends is retried on its own with that same
+backoff while the others keep recording. The choice never widens to every
+output either way. Process loopback needs
+Windows 10 version 2004 (build 19041) or later; on an older build the
+activation fails and keeps being retried, and the track records silence
+meanwhile. With the lab off, or All computer audio chosen, the Windows source
+is exactly the loopback described above, call-app routing included, and its
+route check never reports a choice change while the lab is off.
+
+Checks: `a_choice_records_only_its_own_source`,
+`an_apps_streams_are_added_and_removed_without_reopening_the_source`,
+`a_capture_targets_its_own_sink_and_the_fallback_keeps_the_default`,
+`an_exited_monitor_is_restarted_while_its_sink_keeps_its_name`, and
+`an_event_from_a_replaced_capture_never_reaches_its_slot`
+([meeting/linux.rs](../../src/meeting/linux.rs));
+`a_chosen_sources_synthesized_silence_is_not_a_stall`
+([meeting/capture.rs](../../src/meeting/capture.rs));
+`running_output_streams_name_their_apps_and_node_targets` and
+`hex_own_playback_is_never_an_app_to_choose`
+([microphone_activity/linux.rs](../../src/microphone_activity/linux.rs));
+`a_chosen_meeting_app_taps_every_one_of_its_processes`,
+`a_helper_process_belongs_to_the_app_its_bundle_id_names`, and
+`hex_is_never_an_app_a_meeting_records`
+([microphone_activity.rs](../../src/microphone_activity.rs));
+`an_audio_session_belongs_to_its_top_most_ancestor_outside_the_shell`,
+`an_app_launched_by_another_app_is_its_own_app`,
+`a_browser_child_sharing_its_executable_is_the_browser`,
+`a_webview_helper_merges_with_the_app_that_hosts_it`,
+`a_parent_that_started_after_its_child_does_not_merge`,
+`a_parent_cycle_stops_the_ancestor_walk`, and
+`an_app_id_matches_its_executable_regardless_of_case`
+([microphone_activity/windows.rs](../../src/microphone_activity/windows.rs));
+`a_meeting_lists_each_output_once_with_the_default_first`
+([audio/output_route.rs](../../src/audio/output_route.rs));
+`an_output_is_named_by_its_endpoint_id_or_its_name` and
+`a_saved_output_matches_only_its_own_endpoint`
+([meeting/windows.rs](../../src/meeting/windows.rs)), and
+`the_roots_of_an_app_are_its_processes_whose_parent_is_not_its_own`,
+`the_executable_matches_regardless_of_case_and_only_exactly`,
+`an_orphan_whose_parent_has_exited_is_a_root`,
+`hex_is_never_a_part_of_a_capture_target`,
+`process_loopback_asks_for_16_bit_stereo_at_the_requested_rate`, and
+`interleaved_16_bit_frames_become_mono_float`
+([meeting/windows/process_loopback.rs](../../src/meeting/windows/process_loopback.rs));
+the choice's serde and gate tests in
+[meeting/audio_source.rs](../../src/meeting/audio_source.rs);
+`an_invalid_meeting_audio_source_choice_loads_all_computer_audio` and the
+save/load round trip ([app_settings/persistence/tests.rs](../../src/app_settings/persistence/tests.rs));
+`meeting_audio_source_lists_all_audio_and_keeps_a_missing_choice_visible`
+([rune_ui/tests/panes.rs](../../src/rune_ui/tests/panes.rs)). Not verified on a
+real PipeWire session: whether `target.object` links a capture stream to an
+app's playback node, like the existing unverified sink targeting, and whether
+a `pw-record` added mid-call links without reopening the others. macOS app
+taps compile and lint, but no app capture has been recorded on hardware, so
+neither the timing a rebuilt tap's forwarded audio lands at nor its
+non-lossless gap is measured. macOS output-device taps are unverified on
+hardware too: none has been recorded, so a device-pinned tap's aggregate
+clock is unmeasured. Not verified on Windows hardware either: no Windows
+machine has recorded with the chosen output or app, and CI has no audio
+devices, so the WASAPI process loopback is compiled and its pure logic tested
+there but never opened. An app that plays call audio from a helper outside
+its process tree is not captured; a child process, WebView2 behind the new
+Teams included, is part of the tree.
 
 ## Sub-features
 
@@ -333,17 +634,26 @@ Signal / Telegram / WeChat / LINE / Webex / Element / Phone call, or a browser c
      │   stretches the time
      └── Browser on a page that is not a known call site -> 20 s,
          so voice notes and dictation fields are not offered
-  -> Provider = the website when known, else the app; the website's choice
-     when it has one, else the app's (a browser's choice covers its other
-     sites), else Ask. A Teams page uses the Microsoft Teams app's choice.
-     ├── Never offer -> nothing shown; an earlier offer stays snoozed
+  -> Provider = the website when known, else the app; the website's answer
+     when it has one, else the app's (a browser's answer covers its other
+     sites), else the default (meetings.default_policy, Ask each time).
+     A Teams page uses the Microsoft Teams app's answer.
+     The watcher records the provider in the seen list (below).
+     ├── Don't offer -> nothing shown; an earlier offer stays snoozed
      ├── Always record -> starts recording, no offer   // meetings.auto-record
+     │   └── a default of Always record starts only calls Hex can
+     │       name (not a browser on an unknown page); those are offered
      │   └── recording capsule says "Started automatically" for 10 s; with the
      │       indicator off, a "Recording automatically" capsule with Stop
-     │       and ✕ (✕ only hides it; the recording goes on, in the menu bar)
+     │       and ✕ (✕ only hides it; the recording goes on, in the menu bar).
+     │       Its icon slot is the call-ended capsule's: the call app's icon
+     │       (the provider's mark for a web call), with the red recording dot
+     │       on its bottom-right corner where call ended draws its ring
+     │       (RecordingStarted carries app and application;
+     │       auto_started.rs; icon loading not observed on a real call)
      └── Ask -> Capsule below the menu bar, focus-free  // meetings.offer
-         ├── Title: "Google Meet call detected", "Call on meet.jit.si",
-         │   "Call in Brave Browser" (site unknown), or the meeting's name
+         ├── Title: the app named first, "Google Meet call detected", "meet.jit.si call detected",
+         │   "Brave Browser call detected" (site unknown), or the meeting's name
           ├── The app's local icon, or the website's bundled service mark when
           │   known. Otherwise a neutral call icon, never the hosting browser's.
           │   The same 24 pt slot keeps the title aligned as a local icon loads.
@@ -362,8 +672,10 @@ Signal / Telegram / WeChat / LINE / Webex / Element / Phone call, or a browser c
          ├── … -> "<provider>" · "Change anytime in Settings" (capsule widens)
          │   │   No rule is saved and no recording starts. The choices stay
          │   │   open past the timeout, until answered or the offer is withdrawn.
-         │   ├── Never offer -> saved, close
-         │   ├── Always record -> saved, records this call too
+         │   ├── Don't offer -> saved, close; the app's row shows
+         │   │   in the Calls sheet at once
+         │   ├── Always record -> saved, records
+         │   │   this call too; the row shows in the Calls sheet at once
          │   │   └── not offered for a browser on an unknown page
          │   └── Cancel -> Back to Record / Not now; if the original timer
          │       already fired, the compact offer gets another 20 s
@@ -417,10 +729,19 @@ Signal / Telegram / WeChat / LINE / Webex / Element / Phone call, or a browser c
      └── A call off the microphone for at most 2 s (a missed check) keeps
          its run; a longer release starts it over
 
-Choices persist as `meetings.providers` (`key`, `label`, `policy`:
-`ask` / `always_record` / `never_offer`) in `settings.json`. Missing means Ask.
-The older `meetings.never_offer` list reads as Never offer entries and is
-rewritten as `providers` on the next load.
+Answers persist as `meetings.providers` (`key`, `label`, `policy`:
+`ask` / `always_record` / `never_offer`, shown as Ask each time / Record
+automatically / Don't offer) in `settings.json`; a call without one takes
+`meetings.default_policy` (same values, `ask` by default, so a file from
+before it keeps asking). The older `meetings.never_offer` list reads as
+Don't offer entries and is rewritten as `providers` on the next load.
+
+The seen list is `seen-calls.json` in the data folder: owner-only, at most
+64 apps and websites (key, name, app ID, last seen), oldest dropped first,
+written by the meeting watcher when it detects a call and read by the window
+only while Meetings › Settings or the Calls sheet shows. It is not a setting:
+not in `settings.json`, with no `hex settings` key. Check:
+`src/meeting/seen_calls.rs` tests.
 ```
 
 Call detection knows Brave, Chrome, Safari, Firefox, Edge, Arc
@@ -430,24 +751,28 @@ Brave's), Helium (`net.imput.helium`, helpers included; `helium` and
 (`com.ardia.browser`, its Chromium audio service reports
 `com.ardia.browser.helper`), Zen (`app.zen-browser.zen`; Firefox-based, so its
 helpers are `app.zen-browser.*` rather than `org.mozilla.*`, and on Linux the
-microphone's `zen` or `zen-bin` binary maps to it), and Vivaldi
+microphone's `zen` or `zen-bin` binary maps to it), Vivaldi
 (`com.vivaldi.Vivaldi`; `vivaldi-bin` and friends on Linux, `vivaldi.exe` on
-Windows). Arc was missing until #801, so its Meet calls were never detected;
-Vivaldi was missing until #1105, so its calls
+Windows), and Aside (`at.studio.AsideBrowser`, whose Chromium audio service
+reports `at.studio.AsideBrowser.helper`; tab titles end in ` - Aside`). Arc
+was missing until #801, so its Meet calls were never detected; Vivaldi was
+missing until #1105, so its calls
 (Teams in a Vivaldi web app included) were never offered; Ardia and Zen were
-missing until #1875, so their calls were never offered. Checks:
+missing until #1875, so their calls were never offered; Aside was missing
+until #2525, so its Meet calls were never detected. Checks:
 `a_google_meet_call_in_arc_records_after_about_two_seconds`,
+`a_google_meet_call_in_aside_records_after_about_two_seconds`,
 `vivaldi_on_the_microphone_is_a_browser_call`,
 `ardia_on_the_microphone_is_a_named_browser_call`, and
 `zen_on_the_microphone_is_a_named_browser_call`. Not observed on a real
-Vivaldi, Ardia, or Zen call.
+Vivaldi, Ardia, Zen, or Aside call.
 
 Teams pages (`teams.microsoft.com`, `teams.cloud.microsoft`, and
 `teams.live.com`) are known call sites: a browser on one is a
 Microsoft Teams call after 2 s. They use the Microsoft Teams app's
-`com.microsoft.teams2` choice, so Always record set for the app covers its
-website too; a choice other than Ask saved earlier for a Teams page's own
-address still applies to that host. Check:
+`com.microsoft.teams2` answer, so Always record set for the app covers its
+website too; an answer saved earlier for a Teams page's own address still
+applies to that host until the app's answer is set, which drops it. Check:
 `teams_web_calls_are_the_teams_service`; not observed on a
 real browser Teams call.
 
@@ -466,13 +791,10 @@ microphone too; Webex and Phone take the normal 2 s. On macOS, where Hex reads
 the browser's page, pages on `voice.google.com` (Google Voice), `messenger.com`,
 `facetime.apple.com` (FaceTime), and `web.groupme.com` are named, and any
 `webex.com` subdomain is Webex, with one `webex.com` provider choice covering
-them all. Settings › Meetings › Detected calls always lists the seven apps,
-Google Voice, Messenger, and GroupMe
-(`app_settings::known_meeting_providers`). A FaceTime page gets its own
-`facetime.apple.com` choice from an offer's "…", shown as "FaceTime (web)",
-which does not follow the FaceTime app's choice. A Webex page's `webex.com`
-choice is made the same way and covers every subdomain, so those two have no
-always-listed row. Their Ask / Always record / Never offer choices work as the
+them all. The Calls sheet lists them once Hex has seen a call in them. A
+FaceTime page gets its own `facetime.apple.com` answer, shown as
+"FaceTime (web)", which does not follow the FaceTime app's. A Webex page's
+`webex.com` answer covers every subdomain. Their answers work as the
 existing services' do. The microphone app list in `hex meeting probe` and the
 logs resolves and merges these apps' helpers under the parent app. Phone calls are not verified on a real
 call: Continuity call audio may be held by `com.apple.avconferenced` instead
@@ -547,11 +869,28 @@ site survives a failed query, Hex being in front, or the 30 s between slow
 queries. Safari, Chrome, Firefox and
 Edge expose no URL, so their calls are unnamed unless the foreground context
 says otherwise. Banshee has no recognised room path, so any `banshee.app` page
-counts; it is not in Settings' always-listed providers, but appears under
-Detected calls once its choice is set from an offer's "…". Not observed: the
+counts; it appears in the Calls sheet once Hex sees a call there. Not observed: the
 new tab query against a live Brave with a Banshee call (the script compiles, and
 the thread and memory are unit-tested with fake queries); the Banshee URL shape
 was not available, so the host rule is a guess at "any page".
+
+On Windows the page comes from the browser's own windows through UI Automation
+([windows/context.rs](../../src/windows/context.rs)): every visible window of
+the browser's executable, since the audio utility process that holds a
+Chromium browser's microphone has none, at most six, one read in flight and 2 s
+for the whole read. One automation instance and one COM initialization serve
+the windows, and each window's search stops at its first Document, so a page's
+own content is never searched (UI Automation searches in pre-order, so many
+tabs or bookmarks do not defeat it). The titles are read first, so a hung
+provider still answers with them; a whole-window title is reduced to the page's
+(Edge's profile name, its count of the window's other tabs, and the zero-width
+space in its own name removed) before detection reads it.
+[meeting/detection.rs](../../src/meeting/detection.rs)'s `call_page` picks the
+page from what was read, by the same rule macOS uses for its Accessibility
+pages: a page address that names a call wins, and a call's tab title outranks
+another window's address. A window titled `Meet - …` names a Meet call when no
+address does; with neither, the call stays a plain "<browser> call detected". Not
+observed on a real Windows Meet or Teams call.
 
 On 2026-10-21 Brave opened the microphone for 3-6 s at a time on
 problems.kitlangton.com (board voice notes) and each burst got a "Browser call
@@ -605,6 +944,12 @@ Checks: `a_slow_loop_still_offers_an_unknown_browser_call_after_about_20_seconds
 `the_call_coming_back_withdraws_a_pending_absence_stop_once` and
 `a_snoozed_or_non_browser_application_is_not_queried` (meeting/watcher.rs),
 `the_meeting_tab_query_reads_only_the_active_tab` (dictation/context.rs),
+`a_windows_chrome_on_a_meet_page_is_a_meet_call`,
+`a_windows_edge_on_a_meet_title_without_its_address_is_a_meet_call`,
+`windows_window_titles_lose_the_browser_profile_and_other_tabs`,
+`a_call_s_address_is_chosen_before_another_window_s_page`,
+`a_call_s_title_drops_another_window_s_address`,
+`a_browser_with_no_call_page_keeps_its_first_page`,
 `a_browser_voice_note_is_not_offered_but_a_sustained_browser_call_is`,
 `offer_titles_name_the_service_site_or_browser_without_repeating_call`,
 `choices_apply_to_the_site_when_known_and_the_app_otherwise`,
@@ -883,23 +1228,54 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
   -> Menu bar: record symbol + elapsed time
      ├── "Recording · <title> · 12:34" -> Meetings pane
      │   └── title follows the provisional title (see Titles And Summary)
-     └── Stop & Transcribe
+     ├── Stop & Transcribe
+     │   └── asked -> the tray, the menu bar, and `hex status` read
+     │      "stopping" until capture ends and "transcribing" takes over
+     │      (a stop asked while it is still starting reads so too);
+     │      the tray's Record and the menu bar's Record Meeting stay
+     │      disabled, and `hex meetings record` answers busy (exit 1), never
+     │      "Already recording": the recorder finishes this meeting before
+     │      it takes another (checks: meeting::runtime::tests,
+     │      control::meetings::tests)
+     └── Mute Microphone / Unmute Microphone (Labs › Mute the microphone
+         while recording; see Mute Microphone (Labs))
      (Idle menu bar: "Record Meeting"; "Copy Last Meeting Transcript" sits
       under Paste Last Dictation; there is no Meetings… item, Settings… opens
       the same window)
   -> Floating recording indicator (when Show recording indicator is on) // meetings.indicator
      ├── Rune interactive overlay: a non-activating panel that never becomes key
+     ├── Left out of screen shares and screen recordings, like the panel
+     │   capsules: both capsule windows set OverlayOptions::exclude_from_capture,
+     │   since they show the call's words (the open pill's transcript lines,
+     │   the finished meeting's summary). Rune applies it while a capsule
+     │   shows; it is the OS's best effort, not a security boundary (not
+     │   observed in a real screen share)
      ├── Only the drawn pill takes the pointer (OverlayInput::Regions, the
      │   pill `.hit()`); the window is as wide as the open pill, and clicks
      │   in its transparent rest reach the app beneath (#1305; not observed
      │   on a real Mac)
-     ├── Windows: each capsule's window is only as wide as the drawn pill,
-     │   so the area around it stays clickable (not verified on a real
-     │   Windows machine)
+     ├── Windows: each capsule's window is only as large as what it draws,
+     │   so the area around it stays clickable. The drawn pill opens the
+     │   recording and grows its window to the open panel; the whole window
+     │   then keeps it open while the panel springs out and shrinking it
+     │   waits for the closing surface to land, back to the pill. A pointer
+     │   that outran the opening pill used to collapse it and pull the
+     │   window out from under itself, and a window that shrank first cut
+     │   the closing panel. Entering the window where a closed panel was
+     │   opens nothing; only the pill does
+     │   // checks: the WindowFit tests in meeting_capsules/panel.rs; NOT
+     │   // verified on a real Windows machine
      ├── Windows: Rune waits for a swap-chain slot before each frame (Rune
      │   #985), so the pill's and panel's frames in flight stay bounded
      │   through a long recording (#1833; not measured on Windows)
-     ├── In the saved recording_indicator_corner
+     ├── In the saved recording_indicator_corner, on the primary display, or
+     │   on the display it was dragged to with Labs › Indicator on any
+     │   display (macOS and Windows; `screen::target` pins the window there)
+     ├── Ranks first in the overlay dock: it never moves for another surface,
+     │   and Annotate's capsule and the dictation HUD sitting on its edge of
+     │   its display move past what it draws (the pill, the open panel, the
+     │   finished panel, an offer), 8 pt clear (capture.md#overlay-dock;
+     │   meeting_capsules/dock.rs)
      ├── Follows the setting mid-recording: turning it off hides the pill and
      │   on shows it, keeping the recording's start time, within a second
      │   (the_recording_capsule_follows_the_indicator_setting_mid_recording;
@@ -916,26 +1292,43 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      │   │   and fades its light without squeezing the rows. Checks:
      │   │   `a_pause_gathers_the_light_before_extinguishing_it`,
      │   │   `either_track_can_interrupt_the_release_in_place` (synthetic levels)
-     │   ├── The pill is 151 × 36 pt, its field 78 pt wide (31 columns), with
-     │   │   the rows' 14 pt inset on both sides: the time's right edge is one
-     │   │   line at rest, open and finished (open and finished in a left corner)
-     │   │   (`the_header_keeps_the_rows_inset_at_rest_open_and_finished`)
-     │   └── "Microphone is silent" (warning) or, for its first 10 s, "Started
-     │       automatically" shows beside the meter
-     ├── Hover -> the pill reveals four full-width actions beside the header:
-     │   Stop nearest the meter, Copy new, Copy all, Copy agent prompt; pointer
+     │   ├── Its corners are the capsules' 14 pt at rest and open, so opening
+     │   │   changes its size and never its silhouette
+     │   ├── The pill is 165 × 36 pt: its field 78 pt wide (31 columns), then
+     │   │   an 8 pt red dot 6 pt before the time, with the rows' 14 pt inset on
+     │   │   both sides (`the_header_keeps_the_rows_inset_at_rest_open_and_finished`)
+     │   └── "Microphone is silent" (warning), "Microphone muted" (Labs ›
+     │       Mute the microphone while recording, in its place), or, for its
+     │       first 10 s, "Started automatically" shows beside the meter
+     ├── Hover -> the pill reveals three full-width actions beside the header:
+     │   Stop nearest the meter, Copy agent prompt, Copy transcript; pointer
      │   leaving -> eases back to rest (a held press keeps it open). A bottom
-     │   corner opens upward, its header nearest the screen edge
+     │   corner opens upward, its header nearest the screen edge. No row is
+     │   filled at rest; each fills under the pointer
+     │   ├── A foot link under the copies, on the panel's free edge -> opens
+     │   │   this recording in Meetings (the live transcript there). Until the
+     │   │   call has words it reads "Open in Hex ↗" (36 pt); then it shows
+     │   │   the transcript's last 3 lines, anchored to the newest with the
+     │   │   oldest fading out, and the panel grows 28 pt for them
+     │   │   (panel/peek.rs; `the_open_recordings_foot_opens_the_live_meeting`;
+     │   │   not observed on a real call)
+     │   ├── A quiet 28 pt ✕ (Discard recording) on the rows' icon spine, on
+     │   │   the field's free side -> "Discard recording?" / "Deletes its
+     │   │   audio and transcript" over Keep and Discard (Danger), equal
+     │   │   width; the panel hugs it (126 pt) and the ✕ fades and takes no
+     │   │   input while asked. Discard stops capture, skips the final pass,
+     │   │   and moves the recording folder to the Trash; no finished panel.
+     │   │   Leaving the pill answers Keep
+     │   │   (`a_discarded_recording_dismisses_the_pill_and_shows_no_finished_panel`)
      │   ├── The field widens with the wall, from the rows' 14 pt inset to the
-     │   │   time: 179 pt, 69 columns at the same 2.6 pt pitch, three fewer
-     │   │   for each further digit on the time. It is one field: its free end
+     │   │   time, clear of the ✕: 143 pt, 56 columns at the same 2.6 pt
+     │   │   pitch, 8 pt fewer for each further digit on the time. It is one field: its free end
      │   │   is the wall's motion every frame, in whole columns counted from
      │   │   the held end, no dot is drawn outside its place, the dots that
      │   │   stay keep their light, and a column that arrives is lit from the
      │   │   voice's history. In a right corner it is held beside the time,
      │   │   which stays put; in a left corner it is held at the wall and the
-     │   │   time rides the moving wall 14 pt inside it, so the open and
-     │   │   finished headers match the right corner's (✕ before the time). A
+     │   │   time rides the moving wall 14 pt inside it, with the ✕ beyond. A
      │   │   notice in the header keeps its place and its cut while the
      │   │   field's end, or on the left the time, wipes over it, and has gone
      │   │   by the time the field is halfway.
@@ -960,8 +1353,14 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      │       `reduced_motion_lands_the_surface_and_only_fades`). Offscreen
      │       Rune with a synthetic pointer; not seen in a native window
      ├── Stop -> the icon, label and whitespace use the same 242 × 44 pt row
-     │   and hover/focus bounds as the copies. The plain arrow stays put;
-     │   dragging the meter band repositions, dragging a row does not.
+     │   and hover/focus bounds as the copies. An enabled row shows the
+     │   pointer, a row with nothing to do keeps the arrow, and the meter
+     │   band shows the grab hand. Dragging the band repositions the
+     │   capsule, dragging a row does not
+     │   (`the_meter_band_grabs_and_a_row_with_nothing_to_do_keeps_the_arrow`;
+     │   the offer's and reminder's buttons and body,
+     │   `the_offers_buttons_take_the_pointer_while_its_body_grabs` and
+     │   `a_reminders_buttons_take_the_pointer_while_its_body_grabs`).
      │   A click queues one stop immediately. The pill stays open and the
      │   same row says “Stopping…” in place, its icon and first letters
      │   unmoved, with the waveform and elapsed time until capture ends.
@@ -1022,38 +1421,55 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      │   macOS, Windows, Linux X11, and XWayland when GNOME floats it there,
      │   though Windows and X11 have not been tried on a real machine; only a
      │   native Wayland capsule returns to the corner it started in)
-     ├── Copy new -> copies the turns not yet copied or pasted, through
-     │   the click (see meetings.copy-through-now)
-     │   ├── Shares Option-Control-V's cursor: either one advances both
-     │   ├── Hint: "4 min new" / "8 sec new" (capture time of the turns the
-     │   │   ticker has seen), "Up to date", or "No speech yet"; always enabled
-     │   │   while recording, since the latest speech may not be counted yet
-     │   ├── "Transcribing…" while it waits, then copies; "✓ Copied" for 1.5 s
-     │   └── The wait runs on its own thread, never on the main thread
-     ├── Copy all -> the in-call transcript so far as speaker-turn Markdown;
-     │   disabled until there is text
-     │   └── Both read the Parakeet in-call transcript (TranscriptReader) once a
-     │       second on the ticker thread, never on the main thread
-     ├── Copy agent prompt -> a prompt telling a coding agent to read this
-     │   meeting with `hex meetings show <id> --md`, catch up with
+     ├── Labs › Indicator on any display (off by default; macOS and Windows;
+     │   labs.meeting_indicator_display) -> a release lands in the nearest
+     │   corner of the display under the pointer, measured by that display's
+     │   own size, and saves that display with the corner
+     │   (meetings.recording_indicator_display): a capsule dragged onto a
+     │   second display jumps there instead of gliding, and every capsule
+     │   shows on the saved display from then on. A display that is no longer
+     │   connected places the capsule on the primary display and keeps the
+     │   saved name, and a pointer on no display at all keeps the one it was
+     │   dragged on. Off, every show is put back on the primary display
+     │   explicitly (a pinned capsule returns when the lab goes off), and the
+     │   saved display has no effect
+     │   // checks: the tests in meeting_capsules/screen.rs (a release on its
+     │   // own display, a throw onto another, a pointer on no display, a saved
+     │   // display that is gone, which display holds a pointer, a saved id's
+     │   // target, and the lab off putting a capsule back on the primary);
+     │   // the_display_lab_lands_a_release_on_the_pointer_s_display and
+     │   // without_the_display_lab_a_release_keeps_the_primary_display
+     │   // (meeting_capsules.rs); NOT verified on real multi-monitor hardware
+     │   // on either OS (see Labs)
+     ├── Copy agent prompt (first, in the lead action's ink) -> a prompt telling a coding agent
+     │   to read this meeting with `hex meetings show <id> --md`, catch up with
      │   `--from <mm:ss>` from the last turn copied into it, and search with
-     │   `hex meetings search` (agent_prompt; the hex path is this executable)
+     │   `hex meetings search --meeting <id>` (agent_prompt; the hex path is this executable)
+     ├── Copy transcript -> the in-call transcript so far as speaker-turn Markdown;
+     │   disabled until there is text
+     │   └── It reads the Parakeet in-call transcript (TranscriptReader) once a
+     │       second on the ticker thread, never on the main thread
+     ├── Either copy shows "✓ Copied" for 1.5 s
      └── Stop -> Stop & Transcribe
   -> Settings window may stay closed
 
 Detected app leaves the microphone for about 3 s     // meetings.call-ended
-  -> "Zoom left the call" capsule: Keep recording / Stop & transcribe
+  -> "Zoom call ended" capsule (rune_ui/meeting_capsules/call_ended.rs):
+     the call app's icon (or rounded-rect provider tile), "Hex is still
+     recording.", Keep recording / Stop & transcribe
      ├── It stands in for the recording pill while it shows
      └── Keep recording (or another capsule replacing it) -> the recording
          pill returns with its start time and title
          (keep_recording_brings_back_the_recording_capsule_as_it_was; not
          observed on a real Mac)
-  -> No timeout; nothing stops automatically
+  -> No timeout without an automatic stop; nothing stops automatically
 
 Panel capsules move like the recording capsule (#1093, graduated from Labs; only a native Wayland capsule still returns to its corner) // meetings.panel-drag
   The panel capsules: offer, reminder, left the call, the finished meeting,
   Recording automatically
-  -> Each opens in the saved recording_indicator_corner (read as it shows)
+  -> Each opens in the saved recording_indicator_corner (read as it shows),
+     on the saved display with Labs › Indicator on any display (or the
+     primary display when that display is gone)
      ├── Drag its body (or the recording pill) -> follows the pointer one to one
      ├── Release -> the corner nearest where the throw would coast to rest
      │   (release velocity over the last 80 ms, capped at 6000 pt/s, coasting
@@ -1063,7 +1479,9 @@ Panel capsules move like the recording capsule (#1093, graduated from Labs; only
      │   recording capsule moves there too. A press mid-glide catches it
      │   where it is. Reduce Motion -> it jumps into the new corner; with no
      │   screen to measure (a native Wayland capsule) -> it returns to the
-     │   corner it started in
+     │   corner it started in. Labs › Indicator on any display: the corner is
+     │   measured on the display under the pointer, and a release over
+     │   another display jumps there, saving that display for the corner
      ├── Press on a button -> the button, as before
      └── Escape mid-drag -> back where it was, nothing saved
   -> The finished meeting opens in the corner its recording ended in
@@ -1076,20 +1494,51 @@ Panel capsules move like the recording capsule (#1093, graduated from Labs; only
   around it (#1305); a click on the body outside its buttons still stops
   there
 
-Meetings › Settings › Detected calls › Stop when the call ends (macOS, off by default; #835;
+Meetings › Settings › Calls › Stop when the call ends (off by default; #835;
 meetings.stop_when_call_ends) // meetings.auto-stop
   Only a recording Hex started on its own (Always record); manual, offered,
-  and calendar recordings are never stopped
+  and calendar recordings are never stopped by this switch. Labs › Stop every
+  call recording when the call ends (labs.stop_any_call_recording, off by
+  default) is what stops those, with the same 3 s absence, 30 s grace, Keep
+  recording, and call-comes-back logic below, once it has seen the call app
+  on the microphone at least once; the two switches are separate, and Always
+  record keeps answering to its own
+  ([Stop Other Call Recordings](#stop-other-call-recordings-labs))
   -> The call app counts as present while it holds the microphone OR any of
-     its Core Audio processes plays output (WhatsApp keeps the microphone
-     while muted; its output stays open until hang-up)
-  -> Both off for about 3 s -> capsule says "Hex stops recording in 30 s
-     unless you keep recording."
+     its processes plays output (WhatsApp keeps the microphone while muted;
+     its output stays open until hang-up): Core Audio's running-output
+     processes on macOS, an active render session on any output in
+     IAudioSessionManager2 on Windows, and a running Stream/Output/Audio
+     node in PipeWire's graph on Linux
+     ├── A browser seems to keep its output open after its call while the
+     │   Mac is locked (#2685), so only a browser's playback stops counting
+     │   then: it counts for nothing while the session is locked or the Mac
+     │   is asleep (audio/system_idle.rs), never for a dimmed display, while
+     │   the microphone still counts. A native call app keeps its playback
+     │   (#835), and a muted browser call that drops the microphone while
+     │   locked ends after the 3 s absence and grace like any other call.
+     │   Each locked browser recording logs "the Mac is locked; the
+     │   browser's playback no longer keeps its call present" once. Check:
+     │   `a_locked_mac_stops_only_a_browser_s_playback_counting`
+     └── A failed read counts as playing, so it never stops a recording.
+         Windows and macOS skip an individual output, session, or process
+         that can't be read. On Linux the graph is briefly empty right after
+         its monitor (re)starts, which reads as not playing, harmless because
+         the microphone read is empty too and an absence only counts after 3 s
+  -> Both off for about 3 s -> "<App> call ended" capsule counts down
+     "Recording stops in 30 s", with a concentric rounded-rect ring around
+     the app icon that drains smoothly on the frame clock and fades over its
+     last 0.18 s (under Reduce Motion it steps once a second with no head;
+     ControllerEvent::CallEnded carries the stop's Instant)
+     ├── CallPresence (meeting/detection.rs) counts the absence from the
+     │   first pass that saw it: a gap between passes (a stalled loop or
+     │   sleep) never restarts its 3 s. Check:
+     │   `a_gap_between_observations_never_restarts_a_call_ended_absence`
      ├── App back on the microphone or output within 30 s -> its stop is
      │   dropped; once no other automatic stop counts the notice is withdrawn
      │   and the recording capsule returns (CallEndedWithdrawn)
      ├── Keep recording -> nothing stops for this absence; leaving again re-arms
-     ├── Stop & transcribe -> stops now
+     ├── Stop now -> Stop & Transcribe now
      └── 30 s pass -> Stop & Transcribe, as the menu bar's; logged
          "meeting recording stopped automatically after its call ended";
          its call's snooze ends as after a hand stop, so the app retaking the
@@ -1136,6 +1585,97 @@ meetings.stop_when_call_ends) // meetings.auto-stop
          absence rule
   -> Off -> exactly as above: microphone only, nothing stops
 
+### Stop Other Call Recordings (Labs)
+
+```ts
+Labs › Stop every call recording when the call ends (off by default; every OS)
+labs.stop_any_call_recording // meetings.auto-stop-any
+  Off -> exactly as above: this switch is the only one that stops a
+     recording Hex did not start, and Always record keeps its own
+  On -> an offered recording (Ask each time -> Record), a calendar reminder's
+     recording (macOS; Zoom, Teams, or Slack links only), and a by-hand
+     recording that found a call app stop on their own exactly as Always record's
+     does: the app absent for 3 s, then 30 s of grace under the "Hex stops
+     recording in 30 s unless you keep recording" capsule, with Keep
+     recording and the call coming back dropping the stop
+  ├── Needs nothing else: Stop when the call ends may be off, and Always
+  │   record still answers to that switch alone (each switch covers its own
+  │   recordings; neither stands in for the other)
+  ├── A by-hand recording (Meetings' Start recording, the menu bar, hex
+  │   meetings record) takes its call app from the microphone when it starts:
+  │   the one native call app holding it then (Zoom, Slack, Teams, ... by the
+  │   same canonical bundle detection uses, helpers folded; Windows and Linux
+  │   map the executable name, such as ms-teams.exe, teams-for-linux, or
+  │   zoom), browsers left out so no page is read; none or several leaves the
+  │   recording unwatched, exactly as before
+  │   -> its title, app, and capture stay the recording's own: only the stop
+  │      is associated
+  ├── A calendar reminder's recording watches the app its link names: Zoom,
+  │   Teams, or Slack (CallProvider::application, calendar.rs). A Google Meet
+  │   or Webex link, or a meeting with no call link, has nothing to watch
+  ├── A recording Hex started on request counts an absence only after a
+  │   successful microphone read has found its app on the input at least once
+  │   (CallWatch in meeting/watcher/call_end.rs): playback, such as a
+  │   notification sound or a call window still joining, and a read that
+  │   failed never count as seen, so a calendar recording started before the
+  │   call is answered, or while a waiting room or a slow launch holds, never
+  │   arms a stop for an absence it never sat through. Always record counts
+  │   from its first pass, and with the lab off the "left the call" notice
+  │   shows exactly as before
+  ├── The absence rule only: a browser that never releases the microphone
+  │   between calls (Arc, #1775) is still ended only for a recording Hex
+  │   started itself (the page-switch rule above), so an offered or by-hand
+  │   recording of one keeps running until Stop
+  ├── Turning the lab off while a stop counts drops it, once
+  │   (CallEndedWithdrawn)
+  └── Checks: `the_lab_stops_on_request_recordings_and_the_setting_keeps_always_record`,
+      `a_calendar_recording_counts_no_absence_until_its_app_joins`,
+      `a_recording_kind_knows_whether_it_watches_a_call_app`,
+      `one_native_call_app_is_watched_and_a_browser_or_two_are_not`,
+      `windows_and_linux_executables_link_to_their_canonical_call_app`
+      (meeting/watcher/call_end.rs);
+      `only_an_automatic_browser_call_with_a_code_keeps_reading_its_page`
+      (meeting/watcher.rs); not observed on a real Mac, Windows, or Linux
+      call, or a real Slack huddle
+```
+
+### Mute Microphone (Labs)
+
+```ts
+Mute microphone (macOS; Labs › Mute the microphone while recording, off by default)
+├── Shown only while a meeting records with the lab on
+│   ├── Meetings pane: a Secondary button beside Stop & transcribe
+│   ├── Menu bar: a row under Stop & Transcribe; the status line adds
+│   │   "Microphone muted" while it is on
+│   └── Recording capsule: "Microphone muted" beside the meter, in place
+│       of the silence warning and the automatic-recording notice
+├── Choosing it sends MeetingRequest::SetMicrophoneMuted to the controller
+│   ├── It acts only while a recording runs and the lab is on; anything
+│   │   else is ignored
+│   └── The switch is cleared when a recording starts, when the finished
+│       worker's recording is taken, and on the controller's next pass
+│       after the lab goes off, so every recording begins with the
+│       microphone in and a lab turned back on does not re-mute
+├── On: the microphone's packets carry exact zeros at the length they
+│   arrived at (PacketSink::send_samples), so microphone.wav keeps the
+│   timeline it shares with system.wav and every position stays put
+│   ├── The microphone source still sees what the device carries, so its
+│   │   digital-silence watch neither warns nor reopens for the mute
+│   └── No "You" line is produced while it is on; the call's audio keeps
+│       recording, transcribing, and timing out as it always does
+├── Unmute microphone puts the microphone back in the same recording
+├── Turning the lab off mid-recording restores audio at once: the sink
+│   reads the lab with each packet, and the controller clears its switch on
+│   its next pass so turning the lab back on does not re-mute. The pane,
+│   menu bar, and capsule read the same gate, so their controls go with it
+└── Checks: `a_muted_microphone_goes_silent_in_place_and_the_call_does_not`,
+    `a_microphone_mute_needs_a_recording_and_its_lab`, and
+    `a_lab_turned_off_clears_the_microphone_mute` (meeting/capture.rs, a
+    synthetic mute; the lab is macOS-only); no Mac call ran with the switch,
+    and the menu-bar, capsule, and pane controls are macOS-only code this
+    Linux build never compiled
+```
+
 ### Import Audio (Labs)
 
 ```ts
@@ -1163,6 +1703,10 @@ Meetings > Import audio… (macOS; Labs › Import audio, off by default) // mee
 │       transcript.md, and Copy Last Transcript still say You/Them
 ├── Notes/summary follow exactly as after a recording (the meetings Summaries
 │   setting; Apple Intelligence or OpenCode)
+├── No speech at all -> the import is moved to the Trash with its Markdown,
+│   no notes run, no finished event is sent, and Meetings says
+│   "No speech was found in <file name>."
+│   (check: an_empty_finished_meeting_is_moved_to_the_trash)
 ├── A request while recording or importing is refused; the failure shows in
 │   Meetings as Audio could not be imported
 └── Quitting mid-import
@@ -1181,6 +1725,59 @@ Proof limits: the decoder now has macOS-only unit tests through
 16 kHz float out), but no automated end-to-end run on a real Mac: the native
 picker is not exercised headlessly, and quitting at each mid-import moment is
 reasoned from the shared cleanup scope and `final.pending` rather than observed.
+
+### Delete Transcript Lines (Labs)
+
+```ts
+Meetings > a finished meeting > Select lines (Labs › Delete transcript lines, off by default) // labs.transcript_edits
+├── The pane shows Select lines only for a Complete meeting with turns and no notes running
+│   └── Labs off -> no Select lines, checkboxes, bar, or request; the controller refuses too;
+│       the selection is dropped when the meeting changes, the lab goes off, the meeting leaves
+│       Complete, or its notes start
+├── Selecting a turn selects every published line under it (a coalesced turn can cover several);
+│   the request carries each line's (source, start_ms, end_ms), never its text. Counts are turns
+│   (what was clicked), with singular strings for one
+├── Delete lines… arms; Delete {n} lines is the one confirmation (Return), Escape cancels
+│   └── The bar says its summary and chapters will be removed only when it has either
+├── Controller (meeting::edit::delete_entries) / one path on every OS:
+│   ├── Meetings off, or the lab off -> refused before touching the folder
+│   ├── Recording, Transcribing, final.pending, not Complete, or no final transcript -> refused
+│   │   (src/meeting/delete.rs's refusal codes, plus NotFinished)
+│   ├── Takes the notes claim (notes::InProgress) before reading the manifest, so a summary that
+│   │   finished meanwhile is not overwritten by the cleared one; Notes while one runs, and Trash
+│   │   sees the same claim
+│   ├── Reads transcript.ndjson and drops exactly the requested lines
+│   ├── Writes the cleared manifest first, so a crash before the transcript rewrite leaves notes
+│   │   that mention nothing the transcript no longer has
+│   ├── Replaces transcript.ndjson and transcript.md atomically through the same
+│   │   meeting::publish_transcript_files that final publication uses (tmp + fsync + rename,
+│   │   owner-only)
+│   ├── Drops transcript.rolling.ndjson entries whose key matches a deleted line, keeping its
+│   │   coverage line; the draft chunks the audio differently, so words inside an entry it kept can
+│   │   remain, and no reader shows the draft while the final transcript exists
+│   ├── Clears notes, notes_error, provisional_title, chapters, and chapters_refined: their stored
+│   │   text came from the edited lines and would otherwise reach the shown title, chapters, search,
+│   │   MCP, and the Markdown copy. Regenerate summary reads the edited transcript through
+│   │   notes::summary_entries only
+│   ├── Rewrites the user Markdown copy from the edited manifest only while its bytes still match
+│   │   export_sha256; a copy the user edited (or one with no recorded hash) is left alone
+│   ├── Refreshes a tracked separate notes file under its own hash guard
+│   └── Never opens, rewrites, or deletes system.wav or microphone.wav
+└── Opening the meeting, Copy transcript, Copy section, search, MCP transcripts/notes, and the CLI
+    read the edited files; the query library's fingerprint sees the rewrite
+
+Checks: deleting_turns_rewrites_the_transcript_and_reopens_without_them,
+an_edit_waits_for_the_notes_claim,
+the_summary_prompt_reads_the_edited_transcript_from_disk (through
+notes::summary_entries), and
+the_export_and_rolling_draft_lose_the_lines_but_a_user_edit_stays (meeting/edit.rs);
+turns_carry_exactly_their_own_published_lines (rune_ui/meetings_host.rs);
+deleting_transcript_lines_needs_the_lab_a_selection_and_a_confirmation and
+the_selection_bar_only_warns_about_notes_that_exist (tests/panes.rs);
+scenes meetings-select and meetings-select-confirm. Not observed on a real Mac or Linux
+meeting; the confirmation and hash-guarded export are reasoned from the shared pane and
+write paths.
+```
 The manifest flag, the empty microphone track, the Speaker label, and the lab
 default are unit-checked on every OS that can run them.
 
@@ -1190,8 +1787,13 @@ Capture sources (meeting/capture.rs)                // meetings.capture
 │   │   device UID, ahead of the saved device and the default (#1086)
 │   │   ├── App switches input mid-call -> followed within 1 s, same track
 │   │   ├── App reports no input (muted) -> keeps the one it followed
+│   │   ├── App lists an output-only device (MacBook Pro Speakers) -> never
+│   │   │   followed: only devices with input channels are chosen, so the
+│   │   │   saved device, else System default, stands in; the app's reported
+│   │   │   devices and channels are logged at debug
 │   │   └── Not reported, not listed, Hex Microphone, or won't open -> as below
 │   │      // a_meeting_follows_the_input_its_call_app_records_from,
+│   │      // a_meeting_never_follows_a_device_without_input_channels,
 │   │      // a_meeting_finds_the_input_its_call_uses_by_uid; unverified on a real call
 │   ├── System default changes, the Settings microphone changes, or a missing
 │   │   saved device returns, mid-meeting
@@ -1284,15 +1886,37 @@ Capture sources (meeting/capture.rs)                // meetings.capture
 │          // not verified on a live device or call app
 └── System audio -> Core Audio process tap (global, excluding Hex) on a private
     aggregate device; no display dependency
+    -> the aggregate names no output device, so the tap hears the one that was
+       default when it was created; the source remembers that UID
+       // not verified on a live device: no mid-call output change was
+       // observed with the tap open
+    -> every 2 s it re-reads the default output's UID; a baseline that could
+       not be read adopts the first one that can, rather than never checking
+       -> a different, readable UID -> reopen with the from/to in its error,
+          which rebuilds the tap and its aggregate (a failed read never reopens)
+    -> a system track that carried sound then delivers only exact zeros for
+       15 s -> reopen, logged once by the supervisor with the reason; the
+       reopened stream starts unarmed, so it takes new sound plus another
+       15 s of zeros to fire again
+       // checks: a_system_source_reopens_only_for_a_different_readable_output,
+       // system_silence_never_fires_before_the_track_carried_sound,
+       // system_silence_fires_after_fifteen_seconds_of_exact_zeros,
+       // an_audible_sample_restarts_the_system_zero_count,
+       // a_reopened_system_source_starts_unarmed, and
+       // only_the_system_sink_watches_digital_silence (meeting/capture.rs)
     └── Tap not authorized + Screen Recording granted -> ScreenCaptureKit fallback
 
-A source fails (display sleep ends SCStream, device unplugged, tap stalls 3 s)
+A source fails (display sleep ends SCStream, device unplugged, the default
+output changed, tap stalls 3 s without a buffer, or the system track went
+digitally silent after carrying sound)
   -> Only that source stops; the other keeps recording
   -> Retried every 0.5-5 s until it reopens or the meeting stops
   -> Resumes into the same track; silence fills the gap (>= 1 s) on the
      shared capture clock, recorded in the manifest as track `gaps`
   -> Rolling transcription restarts that source after the gap; the padded WAV
      keeps the final pass on the same timeline
+  -> The digital-silence check runs on every OS through the shared source
+     supervisor, so Linux's and Windows' system tracks get it too
 ``````
 
 Starting a recording no longer opens the Settings window; failures still do.
@@ -1306,10 +1930,13 @@ Checks: `call_end_is_reported_once_per_sustained_absence`,
 `keep_recording_disarms_a_pending_automatic_stop` in
 [meeting/watcher.rs](../../src/meeting/watcher.rs),
 `an_automatic_stop_says_so_and_keep_recording_cancels_it` in
-[meeting_capsules.rs](../../src/rune_ui/meeting_capsules.rs) (auto-stop; not
-yet observed on a real Mac: the output read
-`microphone_activity::application_running_output` against a live WhatsApp
-call, a muted call, and Zoom or Teams helpers),
+[meeting_capsules.rs](../../src/rune_ui/meeting_capsules.rs) (auto-stop).
+The auto-stop and the output read behind it
+(`microphone_activity::application_running_output`) have not yet been
+observed on a real Mac: not against a live WhatsApp call, a muted call, or
+Zoom or Teams helpers, and not on a real muted call on Windows or Linux.
+Other checks: `running_output_streams_say_whether_an_app_still_plays` in
+[microphone_activity/linux.rs](../../src/microphone_activity/linux.rs),
 `paste_cursor_counts_coalesced_turns_and_advances_only_on_success` in
 [meeting/tests.rs](../../src/meeting/tests.rs),
 `meeting_delta_coalesces_turns_in_time_order` in
@@ -1323,6 +1950,7 @@ call, a muted call, and Zoom or Teams helpers),
 `a_meeting_manifest_round_trips_a_microphone_warning_and_old_ones_have_none` in
 [meeting/tests.rs](../../src/meeting/tests.rs);
 `a_meeting_follows_the_input_its_call_app_records_from`,
+`a_meeting_never_follows_a_device_without_input_channels`,
 `a_microphone_that_would_not_open_is_tried_a_bounded_number_of_times`, and
 `only_an_input_the_call_app_reports_counts_as_held` in
 [meeting/capture.rs](../../src/meeting/capture.rs); and
@@ -1343,21 +1971,20 @@ The capsules are Rune overlays in [meeting_capsules.rs](../../src/rune_ui/meetin
 interactive, non-activating `NSPanel`s at status level on every Space,
 fed by the controller events the menu-bar pump receives
 ([macos_rune.rs](../../src/macos_rune.rs)). The offer (20 s), "left the
-call", the finished meeting panel (15 s, title, summary, Copy new, Copy all,
-Copy agent prompt, notes refresh) and a recording pill (voice bars and
-elapsed time at rest; Stop, Copy new, Copy all, Copy agent prompt under the
-pointer; in the configured corner, dragged between corners) are ported. The
-copies are checked by `the_recording_capsule_copies_the_in_call_transcript`,
-`copy_new_copies_the_transcript_read_through_the_click`,
-`copy_new_says_how_much_is_new`, `the_agent_prompt_names_real_commands`, and
+call", the finished meeting panel (15 s, title, summary, Copy agent prompt,
+Copy transcript, notes refresh) and a recording pill (voice bars and elapsed time at
+rest; Stop, Copy agent prompt, Copy transcript under the pointer; in the configured
+corner, dragged between corners) are ported. The copies are checked by
+`the_recording_capsule_copies_the_in_call_transcript`,
+`the_agent_prompt_names_real_commands`, and
 `the_ready_panel_copies_the_finished_meeting`, and rendered by
-`capsule_snapshots` (`recording-rest`, `-hover`, `-copied`, `-transcribing`,
+`capsule_snapshots` (`recording-rest`, `-hover`, `-copied`,
 `-empty`, `-silent`, `-hover-bottom-left`, `ready-finished`); the minimal
 panel (2026-11-12) has not been clicked on a real Mac. Hover and the corner snap
 are checked by `the_recording_capsule_rests_compact_and_opens_under_the_pointer`,
 `dragging_the_recording_capsule_moves_it_and_snaps_to_a_corner`, and
 `a_released_capsule_snaps_to_the_corner_nearest_its_centre`; neither has been
-tried with a real pointer. A "Never offer" or "Always record" choice is saved and
+tried with a real pointer. A "Don't offer" or "Always record" answer is saved and
 also written into the window's live settings. On 2026-10-22 a signed build on a MacBook Pro
 showed the recording capsule (Open opened the meeting while it kept
 recording; Stop transcribed) and the ready capsule (Copy copied the
@@ -1423,29 +2050,10 @@ While recording                                      // meetings.rolling
   -> Every in-call view reads it: Meetings pane, `hex meetings show`, MCP,
      provisional titles (TranscriptReader)
 
-Copy new or Option-Control-V while recording       // meetings.copy-through-now
-  -> The capture writer sends its partial blocks, then the request, in
-     capture order, so the request covers every sample received
-  -> The rolling worker answers it before any later audio:
-     ├── Queued chunks as usual (published to the snapshot)
-     ├── Each track's audio not yet in a chunk (no 6 s minimum), into a copy
-     │   of its transcript: the snapshot and later chunks are unaffected
-     ├── Waits for dictation like every meeting chunk; never a second model
-     └── The same echo and You-waits-for-Them rules as the snapshot
-     ├── Every sample up to the request, even 100 ms past a hard cut; the
-     │   system track counts as transcribed through all its audio
-  -> Each track remembers where the copy ended; its sentence ends there
-     (between the words whose middles lie either side, as boundaries move
-     when a later chunk hears more), so the copied part and the rest of it
-     publish as separate entries and the paste cursor neither repeats nor
-     drops either. A track rebuilt from its WAV after Stop keeps the cuts
-  -> A copy pressed as capture ends is still answered; quitting ends the wait
-  -> Up to 3 s (COPY_TRANSCRIBE_WAIT): usually under 1 s; past that, or with
-     dictation holding the model, copies the in-call transcript as it is and
-     logs a warning
-  -> After Stop, or in another process: the in-call or final transcript
-
 Stop & Transcribe
+  -> The recording reads "stopping" (tray, menu bar, hex status); another
+     recording waits for it: hex meetings record answers busy until the
+     meeting is fully done (idle)
   -> Flush tails -> finish pending chunks           // usually seconds
   -> Any track that fell behind or failed -> stream its WAV in 1 s blocks
   -> Join on one timeline -> Echo suppression -> Final publication
@@ -1478,6 +2086,9 @@ Any of the above, next launch, Meetings on, no recording, engine up (or 30 s)
   -> A pass stops between meetings if a recording starts, and is offered
      again when Hex is next idle
   -> Full-WAV final pass -> Complete + Markdown export + notes
+  ├── No speech -> the recording and its Markdown go to the Trash, no notes
+  │   (checks: an_empty_finished_meeting_is_moved_to_the_trash,
+  │   a_meeting_with_speech_or_a_failure_is_never_discarded)
   ├── Quit again or model not installed -> stays pending
   └── Other failure -> stays Interrupted with the error and its draft
 ```
@@ -1548,8 +2159,9 @@ chunk that also holds speech is not addressed. Without the detector only the
 the vocabulary prompt is emptied too ([models](README.md#get-ready)).
 
 In-call text was a Moonshine draft until 2026-10-22: the pane showed Parakeet
-only for time rolling had covered, and Option-Control-V and the GPUI capsule's
-Copy new pasted the Moonshine draft alone, which garbled names and jargon. The
+only for time rolling had covered, and the meeting paste shortcut
+(Option-Control-V, since removed) and the GPUI capsule's Copy new pasted the
+Moonshine draft alone, which garbled names and jargon. The
 meeting now loads no Moonshine; short Parakeet chunks replace it. Always-on
 streaming Parakeet was rejected because one loaded model cannot serve it:
 transcribe-cpp (0.2.4, and still 0.4.1) allows one active stream per model
@@ -1694,16 +2306,26 @@ labels), `moonshine_command_update_latency`, and `dictation_latency` in
 [meeting/live_replay_tests.rs](../../src/meeting/live_replay_tests.rs): the
 production recorder fed a recording at real time beside the warm dictation
 engine, with a dictation every 30 s, reporting CPU, footprint, dictation
-latency, speech-to-copyable lag, mid-call Copy all and Option-Control-V text
-against the final transcript.
+latency, speech-to-copyable lag, and mid-call Copy all text against the final
+transcript.
 
 ### Save And Reuse
 
 ```ts
 Final publication                                   // meetings.output
 ├── Internal: transcript.ndjson + transcript.md (atomic, owner-only)
+├── No speech at all (Complete, zero transcript entries) -> the recording
+│   folder and its exported Markdown go to the Trash through the pane's
+│   delete path; no finished panel, no notes, and no meeting.finished stream
+│   event for a meeting that is gone. Failed, Interrupted, final.pending, and
+│   echo-suppressed meetings are never discarded, and existing meetings are
+│   not swept when the list loads
+│   // checks: an_empty_finished_meeting_is_moved_to_the_trash,
+│   // a_meeting_with_speech_or_a_failure_is_never_discarded,
+│   // a_meeting_that_dropped_echo_is_kept_even_with_no_entries
 └── Markdown copy -> <folder>/<YYYY-MM-DD HHMM> <title>.md
-    ├── Title, date, duration, app, You / Them turns
+    ├── Title, date, duration, app, You / Them turns (a named remote
+    │   speaker's turn carries the name; see [Speaker names](#speaker-names))
     ├── Never overwrites; adds " (2)"
     ├── Export › Descriptive meeting file names on (off by default;
     │   meetings.export.descriptive_filenames) -> applying notes, refining chapters, or a rename renames it in place to
@@ -1719,40 +2341,36 @@ Final publication                                   // meetings.output
     └── Failure -> Meeting still Complete; "Markdown not saved: …"
 
 Finished meeting panel (15 s, kept open while the pointer is over it; it
-    closes when the pointer leaves after that) -> title · length, the
+    closes when the pointer leaves after that; never shown for a recording
+    with no speech, which is trashed instead) -> a title band (title, its
+    length 2 pt under it, a quiet ↗ beside the title, whole on hover) that
+    opens the meeting in Hex, the
     summary while notes are on (or "Writing a title and summary with Apple
-    Intelligence…", or "Markdown not saved: …"), then the recording's copies
+    Intelligence…" when it writes, "…with OpenCode…" otherwise, or
+    "Markdown not saved: …"), then the recording's copies
     ├── Dark in either appearance, at the recording pill’s last outer corner
     │   (the saved corner if there was no pill for this meeting)
-    ├── × (Close) -> hide immediately, even under the pointer. Late notes do not
-    │   reopen it; the saved meeting and transcript remain in Meetings
-    ├── Copy new -> the turns not yet copied or pasted, from the final
-    │   transcript read off the main thread after the panel shows
-    ├── Copy all -> Markdown, or speaker turns as a fallback
+    ├── × (Close) inside a ring that drains over the stay; the stay holds
+    │   while the pointer is inside and runs on from there when it leaves.
+    │   × hides at once, even under the pointer. Late notes do not reopen it;
+    │   the saved meeting and transcript remain in Meetings
+    ├── Copy transcript -> Markdown, or speaker turns as a fallback
     └── Copy agent prompt -> `hex meetings show <id> --md` and search
     (the_ready_panel_copies_the_finished_meeting,
-    a_ready_panel_whose_time_ran_out_closes_when_the_pointer_leaves)
+    a_ready_panels_stay_holds_under_the_pointer_and_runs_out_after_it_leaves)
 Meetings pane -> Copy icon on a completed row's hover, the card's Copy
     transcript icon, Reveal files (opens the recording folder), and Reveal
     Markdown (selects the exported .md) while the export exists
 Menu bar (idle) -> Copy Last Meeting Transcript
-Option-Control-V -> `MeetingPasteCursor` in `meeting/delta.rs` over the transcript
-│   through the press (meetings.copy-through-now)
-├── Pastes turns added since the last successful paste
-├── Runs in order with dictation output: a dictation finished during its
-│   wait (at most 3 s) pastes after it
-├── Remembers, per source, the capture time spans it pasted (spans within 1.5 s
-│   merge); an entry is new when its midpoint is outside them, so nothing
-│   repeats or drops when the final transcript replaces rolling after Stop, and
-│   text the final pass recovers for audio rolling skipped still pastes
-└── Resets when Hex restarts
 ```
 
 ### Meetings Pane
 
 ```ts
 Header: Start recording (the pane's one Primary button) / red dot, elapsed
-        time, and Stop & transcribe (Secondary), grouped at the right
+        time, Mute microphone or Unmute microphone (Secondary, Labs › Mute the
+        microphone while recording only), and Stop & transcribe (Secondary),
+        grouped at the right
 List (on the title's edge, no divider; grouped Today / Yesterday / date)
 ├── Search meetings (title, app, notes, final transcript) above the rows
 └── Row: title (generated when present), time on the right; meta line
@@ -1760,21 +2378,33 @@ List (on the title's edge, no divider; grouped Today / Yesterday / date)
     recording or failed); no hover fill; a completed row shows a Copy
     icon in the time's place on hover (pointer only; "Copied" as a check)
 Detail (a raised card beside the list)
-├── Title, status chip (not when Ready), date · time · duration · app
-├── Ghost icons top right: Copy transcript, Rename (finished only), "…" menu
-│   └── Copy summary (stays open to show "Copied"), Reveal Markdown (Finder
+├── 18 pt semibold title, status chip (not when Ready), meta line
+│   date · time · duration · app
+├── Labelled Copy transcript and Copy agent prompt, then "…", above a hairline
+│   └── Rename (finished only), Copy summary (stays open to show "Copied"), Reveal Markdown (Finder
 │       selects the exported .md, when there is one), Reveal files (opens
 │       the recording folder), Summarize / Regenerate summary ("Summarizing…"
-│       disabled while running), separator, Delete… (finished meetings only
-│       for the last three)
+│       disabled while writing or regenerating), separator, Delete…
+│       (finished meetings only for the last three)
 ├── Errors at the top of the scroll area
-├── Summary: one paragraph, at most two sentences
+├── Summary: one paragraph, at most two sentences; while one is written or
+│   regenerated, a spinner and the writer's line above the summary already
+│   shown, and the row's meta line begins "Summarizing…"
+│   (check: regenerating_a_summary_shows_progress_above_the_old_summary)
 ├── Chapters (when present): start, name, line, and a Copy section icon
 └── Transcript: stacked turns, no bubbles; "You" in text colour, "Them"
     faint, each with its clock; merged turns; 30 s+ pause lines;
-    "Listening…" while recording
-Empty: "No meetings yet." with a one-line hint; "No meetings match." while
-searching
+    "Listening…" while recording; "No speech was transcribed." for an older
+    empty Complete meeting, or one whose automatic Trash move failed (a lock
+    race or a Trash error leaves it listed)
+Under "Summary" and "Transcript" headings; the list's icons keep one column
+Empty: "No meetings yet" with a one-line hint, Start recording, and a note
+that meetings are kept in Hex on this Mac for 7 days before moving to the
+Trash while exported Markdown stays; "No meetings match." while searching
+System Audio Recording not allowed -> a warning above the list ("Hex can't
+hear the other participants") with Open System Settings
+Meetings off (macOS) -> the sidebar still lists Meetings; its pane is
+"Record your calls" with Turn on Meetings (unless a policy locks it)
 
 Rename -> inline field; Enter or Save          // meetings.rename
   -> manifest title; Markdown heading only while it reads the old title
@@ -1782,24 +2412,50 @@ Rename -> inline field; Enter or Save          // meetings.rename
      names on it follows a changed title only when the heading did too,
      keeping the date and time prefix
   -> empty title refused
+  -> busy refusal while notes or transcript edits hold the process-local
+     writer slot; rename claims before reading and holds through export and
+     manifest publication. Active-recording rename remains available.
 Delete… (overflow menu) -> "Trash recording & Markdown" (or "Trash recording")
   / Cancel, under the title in place of the icons until answered
   -> exported Markdown, then its tracked notes file, then
      Application Support/meetings/<id>, to the Trash
-  -> refused while recording, transcribing, or writing notes   // meetings.delete
+  -> refused while recording, transcribing, writing notes, or waiting
+     for its final transcript (final.pending)      // meetings.delete
+  // checks: deleting_trashes_the_markdown_then_the_recording_and_refuses_while_recording,
+  // deleting_refuses_a_transcribing_meeting_and_one_still_awaiting_its_final_transcript,
+  // deleting_refuses_ids_that_are_not_one_meeting_folder
+
+Agents -> hex meetings delete <id>                 // exact `meetings list --json` id
+  -> the same delete_meeting path the pane uses, through the running Hex
+     (control host; docs/cli.md), so both refuse and trash identically
+  -> unknown id -> not-found; recording/transcribing/notes/final.pending ->
+     meeting-recording/meeting-transcribing/meeting-notes/meeting-final-pending,
+     exit 1, nothing moved
+  -> no interactive confirmation in the CLI; the companion asks first
+  -> done -> "Deleted “<title>”; moved to the Trash"; an open pane drops the
+     row at its next 1 s rescan
+  // checks: deleting_a_meeting_answers_its_refusal_code; JSON shape
+  // {"version":4,"command":"meeting-delete","id":"…"} (control.rs)
 ```
 
 Choice: Delete trashes the Markdown copy too, since it holds the transcript;
 a separate notes file Hex tracks goes with it, and all stay recoverable from
-the Trash. Sources:
+the Trash. A recording that finished Complete with no speech takes this same
+path automatically and never appears in the pane (check:
+`an_empty_finished_meeting_is_moved_to_the_trash`). Sources:
 [rune_ui/meetings.rs](../../src/rune_ui/meetings.rs), the requests in
 [rune_ui/macos_host.rs](../../src/rune_ui/macos_host.rs), and `RevealTarget` /
-`trash` / `rename` in [meeting.rs](../../src/meeting.rs). Checks:
+`rename` in [meeting.rs](../../src/meeting.rs) with `delete` / `trash` in
+[meeting/delete.rs](../../src/meeting/delete.rs) (the pane's Delete and
+`hex meetings delete` share it). Checks:
 `deleting_trashes_the_markdown_then_the_recording_and_refuses_while_recording`,
 `deleting_trashes_a_tracked_notes_file_after_the_transcript`,
 `renaming_updates_the_manifest_and_an_unedited_markdown_heading`,
 `a_rename_follows_the_title_when_descriptive_file_names_are_on`,
 `a_rename_without_descriptive_names_still_retitles_the_notes_file`,
+`rename_and_notes_refuse_both_publication_windows_then_preserve_all_metadata`,
+`rename_claims_before_read_and_releases_after_read_failure`,
+`active_recording_rename_still_saves_the_user_title`,
 `notes_rename_the_export_only_with_descriptive_file_names`,
 `retitling_replaces_only_a_matching_first_heading`,
 `the_exported_markdown_is_the_reveal_target_only_while_it_exists`,
@@ -1823,28 +2479,26 @@ Checks: `markdown_lists_metadata_and_labeled_turns` and
 
 ### Retention
 
-Meeting data is a liability, so new meetings are kept 24 hours by default.
+Meeting data is a liability, so new meetings are kept 7 days by default.
 
 ```ts
 Meetings › Settings -> Keep meetings: 24 hours / 7 days / 30 days / Forever
 │   `meetings.retention` day|week|month|forever, or none (unchosen)
 ├── Unchosen (default) -> meetings recorded since the default began
-│   (manifest `retention_applies`) are kept 24 hours; older ones stay
+│   (manifest `retention_applies`) are kept 7 days; older ones stay
 │   until the user chooses (the `meeting-retention-default` migration
 │   unsets the `forever` that #604 saved as its default)
 └── Chosen -> applies to every finished meeting, older ones included
-Each finished card -> "Deleted after 24 hours" (or 7 days, 30 days), on its
-own wrapping line under the date line, never truncated
+The empty pane says where meetings are kept and when they move to the Trash;
+a finished meeting's detail no longer repeats it
 Meeting controller, Meetings on or off           // meetings.retention
 ├── At launch, hourly, and soon after the setting changes
 ├── Age from ended_at_ms, else created_at_ms; older than its retention
 │   -> the recording folder (audio, transcripts, notes and summary, live
 │      drafts) to the Trash, never removed outright
-│   -> the exported Markdown to the Trash only while its SHA-256 still
-│      matches the copy Hex last wrote (manifest `export_sha256`; Hex's own
-│      heading and notes rewrites keep it current); an edited copy stays
-│   -> a tracked separate notes file to the Trash only while its SHA-256
-│      matches `notes_export_sha256`; an edited copy stays
+│   -> never the exported Markdown or a tracked notes file in the
+│      meetings folder (`~/Documents/Hex Meetings`): those are the
+│      person's copies, and only an explicit Delete moves them
 ├── Skips recording, transcribing, writing-notes, and final.pending
 │   meetings; a later pass retries them
 └── Nothing expires while Hex is not running
@@ -1928,6 +2582,11 @@ While recording, setting on, model available           // meetings.title.provisi
 
 Final publication complete                               // meetings.notes
   -> meeting-notes thread, utility QoS; waits (≤30 s) while dictation is busy
+  -> No speech in the transcript (no entries, or only blank text) -> no call,
+     no notes written; the manifest is rewritten only to clear a stale
+     notes_error. Nothing to summarize is not a notes failure, including a
+     manual Summarize on an older empty meeting (check:
+     a_transcript_with_no_speech_clears_notes_error_without_asking_the_writer)
   -> ONE call over a bounded excerpt, no map-reduce
      ├── Language -> the transcript's own; the instructions say "You MUST
      │   write the title and summary in the language spoken in the transcript
@@ -1936,7 +2595,8 @@ Final publication complete                               // meetings.notes
      │   may appear: …" (≤30 vocabulary terms, read at each generation,
      │   Regenerate included) ahead of the calendar context; its length comes
      │   out of the budget. No vocabulary -> no line
-     ├── Lines "[mm:ss] You|Them: text" (long turns split at 600 chars)
+     ├── Lines "[mm:ss] You|Them: text" (long turns split at 600 chars); a
+     │   named remote speaker's lines carry the name instead of Them
      ├── Whole transcript when it fits; otherwise opening 30 %, up to six
      │   evenly spaced middle passages, ending 20 %, "[…]" between them
      ├── Budget = min(12,000 chars, (context − 1,000 tokens) × 3 chars)
@@ -1975,8 +2635,11 @@ Final publication complete                               // meetings.notes
 
 Unavailable (not eligible / Apple Intelligence off / model not ready / macOS < 26)
   -> Settings row says why; nothing runs
-Meetings pane -> title in list and detail; Summary paragraph above the transcript;
-  "Summarize" / "Regenerate summary" / "Summarizing…" in the overflow menu
+Meetings pane -> title in list and detail; Summary paragraph above the transcript,
+  a spinner and the writer's line ("Writing a title and summary with OpenCode…",
+  or "…with Apple Intelligence…") above it while one is written or regenerated;
+  the list row and the disabled overflow item both say "Summarizing…"
+  (check: regenerating_a_summary_shows_progress_above_the_old_summary)
 Finished meeting panel -> the shown title; "Writing a title and summary with
   Apple Intelligence…" under it, then the summary (at most three lines)
 ```
@@ -2016,6 +2679,23 @@ transcript link follow notes, a rename, or chapter retitles
 keeps its own `<!-- hex:notes -->` summary block and footer throughout. A notes
 file the user deletes stops being tracked and is never written back, even by a
 later regeneration.
+
+Markdown updates share an observed-bytes recheck after the temporary file is
+synced. A separate notes file is replaced whole only while its ownership hash
+matches; transcript heading/notes merges preserve other sections even in an
+edited file, without advancing its ownership hash. A detected editor save
+leaves the external bytes and ownership hash untouched and removes the
+temporary. This is best-effort protection: the final read and rename are not
+a filesystem compare-and-swap. The meeting writer claim is process-local,
+not cross-process locking. Deterministic checks inject saves during rendering
+and after temporary-file sync:
+`notes_file_refresh_preserves_an_editor_save_during_temporary_write`,
+`merge_preserves_an_editor_save_during_temporary_write_and_its_ownership`,
+`a_save_during_render_preserves_the_external_bytes_and_hash`, and
+`a_new_notes_file_does_not_replace_an_editor_save_at_the_selected_path`.
+`merge_keeps_user_sections_without_acquiring_their_ownership` covers the
+distinct merge policy. These are filesystem fixtures, not a physical-editor
+or multi-process proof.
 
 Action items and decisions are gone: other agents read the transcript for
 details (MCP). Older manifests still decode: a list summary is joined into one
@@ -2147,6 +2827,212 @@ The second change landed at 11:02 in 3 runs and one line late (11:24) in 2; the
 first at 05:32 in 2 runs and stayed at the live 06:38 in 3. The model's
 same-topic flag was close to random ("same" for unrelated names, "new" for the
 current one), which is why Rust's name overlap decides.
+
+### Speaker Names
+
+Implemented: the data model, every reader of it, the rules that work out
+names from what a call app shows, and on macOS the reader that writes down
+what a call app shows ([Working out names](#working-out-names)).
+Not implemented: an adapter for any call app, or anything that starts the
+reader, so nothing runs those rules.
+No build writes a `speaker` or a `speakers` table yet, so every remote line
+is still `Them` and every saved file, prompt, and JSON response is what it
+was before.
+
+```ts
+manifest.json -> speakers?: [{ id, name, from }]     // omitted when empty
+├── id: per meeting, short and opaque ("s1", "s2"); a call app's own user id
+│   is never an id and never reaches the disk
+├── name: the display name, cleaned (below)
+└── from: "call_app" | "calendar" | "user"
+transcript.ndjson, transcript.rolling.ndjson -> speaker?: "s1"
+└── An id in that table; omitted when Hex is not sure, which is every line
+    today. The schema versions stay 1: both fields are additive
+What a line is called -> one rule (src/meeting/speakers.rs, Labels::of)
+├── A remote line whose speaker the table knows -> the name
+├── Otherwise exactly as before: You, Them, or Speaker where an imported
+│   file's one track already said Speaker
+├── A microphone line is always You, whatever its speaker field says
+├── An id the table does not know -> the track's label
+└── A saved speaker that is not an id Hex could have minted (`s` and a
+    number), or a table row whose id, name or origin does not parse -> read
+    as absent; the line is called by its track and the meeting still opens
+Turns -> adjacent lines join only on the same track and the same speaker; a
+         named line never merges into an unnamed one
+Readers that show the name
+├── Exported Markdown, Copy transcript, Copy section, the folder's own
+│   transcript.md
+├── Notes prompt lines "[mm:ss] Priya Nair: …"
+├── hex meetings show (Markdown; --json meeting.speakers and
+│   entries[].speaker; --srt and --vtt cues), list --json (meeting.speakers)
+├── MCP: get_transcript turns, search_transcripts speakers and context
+│   lines, list_meetings participants "You, Them, Priya Nair (Zoom)"
+└── Meetings pane turns (a name is shown as is, never translated)
+Readers that stay You / Them
+├── Chapter prompts: where a topic changes does not depend on who speaks,
+│   so no name goes to that model
+├── The provisional-title prompt and the recording capsule: a recording
+│   under way has no names
+└── get_transcript's speaker filter (you | them | all)
+Names are untrusted: other people choose them, and models and agents read them
+├── A name exists in the code only as a cleaned value (SpeakerName), made
+│   from call-app text or from a manifest the same way:
+│   one line, single spaces, no control characters, zero-width spaces,
+│   direction overrides or Unicode tags, none of * ` [ ] < > \, 64 characters
+├── Refused: nothing left, or You / Them / Speaker / Notes in any case, so
+│   nobody on a call can make their words read as You. The line stays Them
+└── Never logged: a table prints its ids and origins, not its names
+Debug Markdown parser (hex meeting summarize|chapters <path>) -> any turn
+    heading is a turn; You is the microphone, a name or Speaker is remote
+```
+
+Checks: `an_old_manifest_and_transcript_round_trip_byte_for_byte`,
+`speakers_are_saved_as_a_table_and_an_id_on_each_named_line`,
+`a_hostile_name_comes_out_clean`,
+`a_name_can_never_be_one_of_hexs_own_labels_or_nothing`,
+`a_table_read_from_disk_is_cleaned_like_one_built_here`,
+`a_saved_line_whose_speaker_is_not_an_id_reads_as_unnamed`,
+`printing_a_table_for_a_log_never_prints_a_name`,
+`a_line_is_called_by_its_speakers_name_or_else_what_it_always_was`,
+`a_turn_splits_where_the_speaker_changes`,
+`markdown_shows_the_name_in_the_export_a_section_and_the_folders_own_file`,
+`the_notes_prompt_gives_each_line_its_speaker`,
+`agents_and_the_cli_read_the_name_in_transcripts_search_and_the_list`,
+`a_named_speaker_shows_in_meeting_json_and_subtitles`,
+`a_named_speaker_gets_their_own_turn_under_their_name`, and
+`meeting_json_contract_snapshot` (unnamed JSON is unchanged). All run on
+hand-built tables; no recorded meeting has a named speaker.
+
+#### Working Out Names
+
+Exists (`src/meeting/speakers/`), tested, and called by nothing: the evidence
+a reader saves, a calibration, the resolver, the step that turns its answer
+into the table and ids above, and on macOS the reader itself with the seam a
+call app's adapter plugs into. Does not exist: an adapter for any call app
+(each is written against a live read of that app), anything that starts the
+reader with a recording, the wiring into the transcript worker, a Labs
+switch, the pane's corrections, any voice model. No file is written and no
+name appears.
+
+```ts
+speakers.ndjson (meeting folder, owner-only, to the Trash with the folder)
+├── The one record of who spoke. The manifest's table and each line's
+│   speaker are rebuilt whole from it and are never edited themselves
+├── participant: key ("p1", "p2": opaque, per meeting, never a call app's
+│   user id), cleaned name or none, whether they are the user, first seen
+├── floor: one look at the call app -> who it marked as speaking, or nobody
+├── untrusted: one look that counts as no look -> cut_short | window_hidden
+│   | two_windows | failed_health_check
+├── correction: the user says these words were this person's, or "not
+│   sure", or this person goes by this name here. Rewritten atomically; a
+│   later correction replaces the ones it covers
+└── Times are ms from the start of the recording. A line this build cannot
+    read is skipped and kept
+Calibration (pure) -> the user's own tile against the user's own microphone
+├── Fewer than 5 lit stretches -> unproven: names still worked out, on an
+│   assumed 0.5 s to come on and 1.5 s to go off
+├── 4 in 5 lit stretches have the user's speech under them -> healthy,
+│   with the middle lag and a long tail measured on this call
+└── Fewer, or 8 turns of 2 s with the tile never lit -> unhealthy: nobody
+    is named from what the reader saw
+Resolver (pure) -> (remote words' times, evidence, calibration, strictness)
+    -> spans of remote speech, each one person's or nobody's, with a reason
+├── 1. A correction stands, whatever else is true
+├── 2. An unhealthy call names nobody
+├── 3. One remote person on the whole call -> every remote word is theirs
+├── 4. Otherwise the floor decides. Looks become stretches (held, lingering,
+│      coming on, passing over, nobody, unknown), moved back by the lag; two
+│      looks more than 0.75 s apart leave the time between them unknown
+│   ├── as seen: each word takes the holder at its own moment
+│   ├── steady window (default): a span between pauses of 0.3 s is one
+│   │   person's when they alone show across it; where the floor changes
+│   │   inside continuous speech the words within 0.75 s go unnamed, and so
+│   │   do words under a mark that is only lingering
+│   └── whole segment: a stretch between pauses of 0.6 s (10 s at most) is
+│       named whole when one person holds 4 words in 5, else not at all
+└── 5. Everything else is nobody's (Them), with why: no evidence, untrusted
+       look, nobody held the floor, the user held it, floor changed, mixed
+Lines -> a remote line takes a speaker only when everything it overlaps was
+    said by one person the call app showed, with a usable name; ids s1, s2
+    in the order people first speak; a name the user gave is from "user"
+Reader (macOS only: it reads accessibility::tree snapshots) -> speakers.ndjson
+├── Adapter, one per call app (pure) -> a snapshot of the app's windows ->
+│   active { roster, floor } | no call window | untrusted(reason). Found by
+│   canonical bundle id or by the call page's host. None is listed yet
+├── Before any adapter is asked: a snapshot a budget cut short -> untrusted
+│   cut_short; an app with no window -> no call window
+├── Poll state (pure) -> one look in, the lines it adds out
+│   ├── The app's own id for a person never leaves memory: each gets the
+│   │   next key (p1, p2) when first seen, after any the meeting holds
+│   ├── participant: when first seen, and again when the app shows them
+│   │   differently (cleaned name, whether they are the user). Two tiles
+│   │   of one person are one person
+│   ├── floor: every look at a call read whole -> the one marked, or nobody
+│   ├── untrusted: the adapter's reason, or cut_short
+│   └── Nothing for no call window, or for a mark on someone never shown
+├── Loop -> a look every 0.5 s on the recording's clock, stamped when it
+│   starts; a look that overran -> a 0.25 s rest and one look, not the ones
+│   missed; ends with the recording, with nothing read or written after
+├── A write that fails -> those lines are lost and counted, and everyone
+│   is written again at their next look
+└── Logs -> what a look came to when that changes (debug), one warning for
+    a run of failed writes, counts at the end. Never a name or an app id
+```
+
+Not reconciled yet: when the app shows someone differently the reader writes
+a second participant line, and the resolver still takes the first line for
+each key, so a name that arrives after the tile does names nobody.
+
+The accepted limit: a call app marks one speaker at a time, so words said
+over the person holding the floor take that person's name, at every
+strictness. A reply within half a second of someone stopping can too.
+
+Measured (research simulation, not this code and not a live call):
+`measurements-indicator-sim.md` ran this kind of rule over word timings from
+16 recorded in-room meetings with a modelled call app. Where one person
+talks at a time, its steady-window rule named 90.5% of words right and 0.1%
+wrong; on words spoken over someone else it was wrong on 27.2%. Over all
+words its rules ranged from 79.8% right / 11.9% wrong (as seen) to 61.3% /
+4.5% (whole segments). `measurements-voice-hybrid.md` added a per-meeting
+voice check on real audio: 85.1% right / 10.3% wrong against 80.8% / 8.5%,
+with 95.6% of its wrong names on overlapped words, so no voice model is
+planned here. The resolver's own constants have not been run against that
+corpus, and nothing has been measured on a real call.
+
+Checks: `people_taking_turns_are_each_named_for_every_word`,
+`a_change_of_floor_in_a_pause_keeps_the_words_on_both_sides`,
+`a_change_of_floor_inside_continuous_speech_leaves_the_words_beside_it_unnamed`,
+`words_said_over_the_person_holding_the_floor_take_that_persons_name` (the
+limit, as a test), `a_reply_under_a_lingering_mark_is_not_named_unless_read_as_seen`,
+`looks_that_could_not_be_trusted_count_as_no_look`,
+`a_reader_watching_the_wrong_tile_names_nobody`, and four properties over
+random calls: `with_no_evidence_nobody_is_named`,
+`taking_evidence_away_never_adds_a_name` (at the reader's pace of a look
+every half second), `an_unhealthy_calibration_names_nobody`,
+`a_correction_always_wins`. The call app in them is a port of the
+simulation's model, not a real one. File handling:
+`the_file_is_readable_by_its_owner_only_before_and_after_a_correction`,
+`a_line_cut_short_by_a_crash_spoils_only_itself`,
+`a_line_from_a_newer_build_is_skipped_and_survives_a_correction`.
+
+Reader checks (macOS; an invented call app read from hand-written snapshots,
+a clock that moves only when waited on, no real app):
+`people_are_written_once_under_keys_in_the_order_they_are_first_seen`,
+`someone_the_app_comes_to_show_differently_is_written_again_under_their_key`,
+`the_floor_is_written_at_every_look_as_it_passes_from_one_to_another`,
+`a_snapshot_cut_short_is_an_untrusted_look_and_names_nobody_new`,
+`two_call_windows_are_an_untrusted_look`,
+`a_hidden_call_window_is_an_untrusted_look_for_as_long_as_it_is_hidden`,
+`the_file_holds_keys_and_names_and_never_an_app_id` (the real file),
+`the_log_holds_counts_and_reasons_and_never_a_name_or_an_app_id` (everything
+logged at every level), `lines_that_were_not_saved_are_counted_and_everyone_is_written_again`,
+`a_slow_look_is_followed_by_a_rest_and_one_look_not_by_the_ones_it_missed`,
+`stopping_ends_the_reader_with_nothing_read_or_written_afterwards`, and one
+property over random looks:
+`whatever_an_app_shows_every_key_is_introduced_before_it_is_used_and_no_id_is_written`.
+Seam: `a_snapshot_cut_short_is_never_shown_to_an_adapter`,
+`an_app_is_read_by_the_adapter_listed_under_its_key`, `no_app_is_listed_twice`.
+Nothing has read a real call app through it.
 
 ### Agent Access (MCP)
 
@@ -2298,45 +3184,41 @@ warm; searches 0.6–1.5 ms; a 48,000-char `get_transcript` 0.6 ms;
 max 22 ms), listed, and exited 0 in 76 ms wall. The LaunchAgent is not loaded,
 so ssh-agent access from launchd is unverified.
 
-Granola import: see [granola-import.md](../plans/granola-import.md).
-
 ## Gaps
 
-- No executed end-to-end recording with a real call, Screen Recording grant, or
-  speakers echo in this change; see the test script in the handoff.
-- The process tap, its System Audio Recording prompt, and display-sleep
-  recovery have not run in a recorded meeting. TCC status comes from the
-  private `TCCAccessPreflight`; a denied tap would otherwise record silence.
-- Microphone and system audio now run on separate device clocks aligned by
+- End-to-end macOS recordings (process tap, rolling transcript, final
+  publication, and Apple Intelligence titles/summaries) have run on real calls
+  in daily use (37 recorded meetings, 54.7 h as of 2026-11-25), including
+  `hex meetings show <id> --md` mid-call. Windows and Linux still have no
+  recorded end-to-end call.
+- Display-sleep recovery on the process tap and a denied System Audio
+  Recording prompt remain unverified in a live call. TCC status comes from
+  the private `TCCAccessPreflight`; a denied tap would otherwise record
+  silence. The 15 s system digital-silence watchdog now refreshes Core Audio
+  taps in place (and reopens other backends without retry sleep), but has not
+  yet been re-measured on a live call app.
+- Microphone and system audio run on separate device clocks aligned by
   arrival time; drift below the 1 s gap threshold is uncorrected and echo
   thresholds were tuned on ScreenCaptureKit's shared clock.
-- Calendar titles (EventKit) are not implemented.
 - In-call text trails speech by one chunk plus its settling (seconds, see the
   replay numbers); nothing shows a partial sentence before then. A track that
   falls more than 120 s behind skips audio until Stop rebuilds it.
-- The recording capsule's Copy new / Copy all are unverified on a real Mac
-  screen; its count can trail the transcript by up to a second.
-- Copying through the click is checked with a fake model only; its real-Mac
-  latency and how often the 3 s wait runs out are unmeasured. Handing a
-  copy's cuts from the rolling worker to the WAV rebuild in `transcribe` has
-  no test of its own; the rebuild with cuts does. The copy waits
-  for the next audio packet to arrive, so with both sources stopped it runs
-  out of time and copies the in-call transcript.
-- The Meetings pane is verified by Rune goldens rendered offscreen (on Linux
-  and on hailmary's Metal), not on a Mac screen; the capsules have no golden.
+- The recording capsule's Copy agent prompt / Copy transcript are unverified
+  on a real Mac screen; Copy transcript can trail the live transcript by up
+  to a second while recording.
+- The Meetings pane and five capsule states (recording rest and open,
+  auto-started, call-ended, and ready) are verified by Rune goldens rendered
+  offscreen on Linux, not on a Mac screen; the offer, finalizing, and
+  calendar-reminder capsules have no golden yet.
 - Echo thresholds are tuned on two speaker-mode calls (2026-10-15 and
   2026-10-16), with six hand-labeled local utterances; other rooms, external
   speakers, and Bluetooth are unmeasured. The 2026-10-16 replay audio was lost
   with Studio's temporary directory, so those numbers cannot be re-run. Real
   NSFileManager trashing and the native rename field are unexercised in the app.
-- CPU, memory, and latency numbers come from the replay harness on the Pro,
-  not a recording in the app with real capture and hotkey dictations.
-- The short-chunk rolling transcript has not run in a real call yet.
-- Why the rolling worker stalled for over a minute on the Pro is unknown; slow
-  chunks (> 5 s) are now logged.
-- Titles and summaries have not run after a real recording in the app; the CLI
-  path exercised the real model, and the provisional-title thread, its manifest
-  write, and the menu/pane refresh are unexercised in a live recording.
+- CPU, memory, and latency numbers come from the replay harness, not a
+  recording in the app with real capture and hotkey dictations.
+- Why the rolling worker stalled for over a minute in earlier replay testing
+  is unknown; slow chunks (> 5 s) are now logged.
 - The transcript-language rule in the notes and chapter prompts is prompt-level
   only: it has not run on a real Mac against a non-English meeting, so whether
   Apple Intelligence and a given OpenCode model honour it, and how they word a

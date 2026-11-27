@@ -13,6 +13,7 @@ platforms, and dependencies.
 - [Rearm without a phantom capture](#rearm-without-a-phantom-capture).
 - [Reopen with fresh audio](#reopen-with-fresh-audio).
 - [Keep an interrupted dictation](#keep-an-interrupted-dictation).
+- [Keep a press across a reopen](#keep-a-press-across-a-reopen).
 - [Fence late capture notifications](#fence-late-capture-notifications).
 - [Degrade only the failing dependency](#degrade-only-the-failing-dependency).
 - [Keep Linux listeners managed](#keep-linux-listeners-managed).
@@ -278,7 +279,11 @@ initial open fails OR stream interrupts
   -> a dictation held past the hold threshold, or a `hex dictation start`
      control capture, keeps what it heard    // recover.interrupted-dictation
      -> transcribed and copied, never pasted
+  -> a press that has not passed the hold threshold waits for the reopen
+     -> its capture starts at the first fresh chunk  // recover.interrupted-press
   -> otherwise cancel the incomplete capture + discard stale audio  // interrupted audio cannot return
+  -> an idle, release-tail, or annotate-only interruption is the stream's
+     own recovery: no failed dictation is recorded  // recover.idle-interruption
   -> bounded backoff -> reopen the resolved input     // warm microphone retries
   -> replacement delivers new audio
   -> fresh capture -> release -> expected output
@@ -290,7 +295,22 @@ device reports no default format at all               // #1845, Windows default 
   -> log the driver's reason and kind, not just the wrap // audio/input_format
   -> try the direct WASAPI paths, then the formats it lists
      (48 kHz, else 44.1 kHz, else the range's top) // unverified on real Windows
-  -> none opens -> the read error, with its cause, goes to recovery
+  -> none opens -> the read error, with its cause, and the direct path's
+     failure, go to recovery
+Windows System default input or output                       // audio::default_endpoint
+  -> resolve the default endpoint id on one MTA thread       // the endpoint thread
+     initializes MTA; callers need no COM of their own
+  -> open the listed cpal device with that id                // never cpal's default handle:
+     cpal's default-handle monitor initializes COM as STA on Windows thread-pool
+     threads, so ActivateAudioInterfaceAsync later fails with RPC_E_CHANGED_MODE
+  ├── input: no default endpoint resolves -> a listed stand-in microphone
+  │   (built-in first); the next route change resolves the default again,
+  │   and only nothing usable being listed is an error
+  ├── output: a listed device will not open -> try the next listed output
+  │   -> none opens -> the tone is dropped                   // never the default handle
+  └── default endpoint changes -> an IMMNotificationClient bumps the input or
+      output route generation                                // no COM calls in the callback
+      -> input switches once capture is idle; a warm feedback output reopens
 no input device at all (macOS)
   -> devices whose name can't be read are skipped     // audio::device_name, never Display
   -> bounded recovery; `hex status` listener: "No microphone"
@@ -399,6 +419,10 @@ meeting microphone stream delivers only exact zeros for 3 s (macOS, #1518)
 open stream stops delivering audio without an error (any OS, #1206)
   -> 4 s with no chunk (STREAM_STALL_TIMEOUT) -> treated as a stream failure
   -> reopened like any interrupted stream, idle or not // logged "microphone stopped delivering audio"
+     ├── an idle listener, a submitted release tail, or Annotate copying the
+     │     microphone -> recovery only, no failed dictation // recover.idle-interruption
+     ├── a press on the stalled stream is kept, not started on dead audio
+     │     -> its capture starts at the reopened stream's first chunk
      ├── it delivered for 8 s without stopping (STREAM_PROVEN_UPTIME) -> it was working:
      │     reopen at once with the backoff reset // exactly as before
      └── any stream that fails before that never proved steady delivery (#1681)
@@ -743,6 +767,44 @@ and raw clips are both copied, with normal and raw history). Proof limit:
 channel-backed audio and the output worker, not a physical microphone taken by
 a call app or a target app's clipboard.
 
+### Keep A Press Across A Reopen
+
+`recover.interrupted-press`: a shortcut press taken before the hold threshold
+that arrives while the microphone cannot capture yet — the stream stopped
+delivering, its replacement is opening, or it opened but has not delivered —
+is kept instead of dropped. The capture begins at the first fresh chunk and
+anchors there, so audio from an earlier stream never joins it. The HUD and log
+already say dictating. Releasing or cancelling while the press waits discards
+it like any pending start.
+
+A reopened stream that is interrupted again before it delivers discards the
+press and records the failure, so the person sees why nothing was dictated.
+While opens keep failing, no event ends the press: it waits until it is
+released or cancelled (Release microphone while idle's failed on-demand open
+still clears it and reports the failure), and the listener keeps retrying with
+its bounded backoff.
+
+```ts
+press before the hold threshold while the stream cannot capture
+  -> the press waits, and the log says dictating
+  -> a failed stream's replacement still starts        // audio.rs recv_timeout
+     -> start_pending never holds the microphone closed
+  -> first fresh chunk -> capture starts there, with no pre-roll
+  ├── released or cancelled meanwhile -> discarded
+  └── interrupted again before any audio -> discarded + failed dictation
+```
+
+Both listeners keep the press when `DictationCapture::tentative_start` is
+`Some`: the capture is cancelled and turned back into a pending press. A
+capture past the hold threshold is dropped. The audio-owner pieces they share
+(`capture_idle` and a stalled stream) live in
+[audio/interruption.rs](../../src/audio/interruption.rs). On macOS the
+equivalent is the cold-stream branch of
+[dictation/audio.rs](../../src/dictation/audio.rs) that turns a tentative
+capture back into its pending capture. Proof limit: the Windows listener is
+compiled only on Windows, so its arm is proven by `Check Windows` rather than
+the Linux suite.
+
 ### Fence Late Capture Notifications
 
 `recover.late-notification`: keeping a failure visible is correct until it
@@ -823,6 +885,33 @@ The other copies' failures are kept out by which call sites publish, not by a
 test: reproducing one needs a GPU and a model.
 A load-time out of memory stays the [`recover.gpu-full`](#degrade-only-the-failing-dependency)
 path, which keeps retrying in place.
+
+`recover.gpu-start-crash`: on Windows a launch that crashes while ggml starts
+a GPU cannot be caught, so `gpu-start.pending` spans that work (#662).
+
+```ts
+GPU start -> marker "<version> <crashed + 1>" written before the risky work
+  ├── start succeeds -> marker removed; a crash outside a GPU start is not counted
+  └── process crashes -> the next launch of the same build reads it
+      ├── crashed < 2 -> one automatic retry (a bare <version> from the first
+      │   format counts as one crash)
+      └── crashed >= 2 -> CPU only, warned in process.log and said in
+          Settings › Speech engine; re-picking Auto or GPU clears the marker
+          and says the GPU turns on at restart; an update deletes a marker
+          from another build
+```
+Source: `gpu_start_at`, `guarded_at`, and `gpu_guard` in
+[transcription/local_transcriber.rs](../../src/transcription/local_transcriber.rs);
+the row in [rune_ui/general.rs](../../src/rune_ui/general.rs), whose note comes
+from `crash_fallback` in [transcription/gpu_health.rs](../../src/transcription/gpu_health.rs).
+The loaded model's device is also in `hex status` (`model.backend`) and its
+Speech line, which says "CPU (GPU start crashed twice)" after the marker
+forced the CPU.
+Checks: `the_first_formats_bare_version_gets_one_retry`,
+`two_crashed_starts_keep_the_cpu`, and
+`every_guarded_scope_records_this_launchs_attempt` (marker rules only).
+Proof limit: not observed on a real Windows GPU-driver crash, and no test of
+the Settings row itself.
 
 `recover.command-pressure`: command recognition is best-effort; dictation
 audio is not.
@@ -1061,6 +1150,23 @@ capture failed with Screen Recording permission unavailable; no screenshot
 verification is claimed. The installed local app and its settings were not changed.
 Changing layouts during a running GUI session still requires a restart to
 refresh its snapshot; live GUI layout refresh is not part of this fix.
+
+### Launch Past A Leftover Discovery File
+
+**Fixed November 26, 2026 (issue 2887):** a Hex that stopped uncleanly (a
+restart, a power loss) leaves `local-api.json` behind. Launch used to probe
+the pid and port it names and refuse to start when both answered, with
+"another local API service appears to be running". After a reboot the system
+can hand both to unrelated programs, so Hex quit about 70 ms into every
+launch, with no window, until the file was moved aside. The local API takes
+its instance lock (`local-api.lock`, beside the file) before it looks at the
+file, and while it holds that lock no other Hex can publish there, so the
+launching Hex now replaces a leftover file without probing it. A second Hex
+is still refused, by the lock. Clients that only read the file (`hex status`
+while no Hex runs) still probe the pid and port.
+Check: `a_leftover_file_naming_a_live_pid_and_port_does_not_stop_the_lock_holder`
+in [local_api/discovery.rs](../../src/local_api/discovery.rs); not reproduced
+by rebooting a Mac.
 
 ## Gaps And Constraints
 

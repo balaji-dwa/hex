@@ -101,8 +101,20 @@ pub(super) const SCENES: &[Scene] = &[
         ui.history = history::HistoryPane::fixture();
         ui.history.stats = Some(history::HistoryPane::fixture_stats());
         ui.history.usage = Some(history::HistoryPane::fixture_usage());
-        ui.history.stats_open = true;
+        ui.open_modal(Modal::HistoryStats);
         ui.settings.labs.history_stats = true;
+        crate::labs::apply(&ui.settings.labs);
+        ui.pane = Pane::History;
+    }),
+    // Labs › Stats on History: the dialog's six headline numbers as one
+    // compact strip above History's list.
+    ("history-stats-strip", |ui| {
+        *ui = portal_fixture();
+        ui.history = history::HistoryPane::fixture();
+        ui.history.stats = Some(history::HistoryPane::fixture_stats());
+        ui.history.usage = Some(history::HistoryPane::fixture_usage());
+        ui.settings.labs.history_stats = true;
+        ui.settings.labs.history_stats_strip = true;
         crate::labs::apply(&ui.settings.labs);
         ui.pane = Pane::History;
     }),
@@ -113,21 +125,34 @@ pub(super) const SCENES: &[Scene] = &[
         ui.history = history::HistoryPane::fixture_selection();
         ui.pane = Pane::History;
     }),
-    // Labs › Screenshots' Captures: a shot, a recording with its words, and
-    // an older shot; and before any.
+    // Annotate's Captures tab with Labs › Screenshots on: a shot, a recording
+    // with its words, and an older shot; and before any.
     #[cfg(hex_capture)]
     ("captures", |ui| {
         *ui = portal_fixture();
+        ui.settings.capture.enabled = true;
         ui.settings.labs.screenshots = true;
+        ui.platform.scrawl = Some(platform::ScrawlView::preview());
         ui.captures = captures::CapturesPane::fixture();
-        ui.pane = Pane::Captures;
+        ui.pane = Pane::Annotate;
     }),
     #[cfg(hex_capture)]
     ("captures-empty", |ui| {
         *ui = portal_fixture();
+        ui.settings.capture.enabled = true;
         ui.settings.labs.screenshots = true;
+        ui.platform.scrawl = Some(platform::ScrawlView::preview());
         ui.captures = captures::CapturesPane::fixture_empty();
-        ui.pane = Pane::Captures;
+        ui.pane = Pane::Annotate;
+    }),
+    // Annotate's default Annotations tab (without Labs › Screenshots).
+    #[cfg(hex_capture)]
+    ("mac-annotate", |ui| {
+        *ui = mac_fixture();
+        ui.settings.capture.enabled = true;
+        ui.platform.scrawl = Some(platform::ScrawlView::preview());
+        ui.captures = captures::CapturesPane::fixture();
+        ui.pane = Pane::Annotate;
     }),
     ("history-empty", |ui| {
         *ui = portal_fixture();
@@ -164,6 +189,22 @@ pub(super) const SCENES: &[Scene] = &[
         ui.history.unified.picked = Some(std::path::PathBuf::from(
             "/Users/alex/Library/Application Support/Scrawl/captures/1.scrawl",
         ));
+    }),
+    // The Paste Last picker a held Paste Last opens, centred over the
+    // window as it is over the display: the newest row, a capture, selected
+    // with its picture in the preview.
+    #[cfg(all(target_os = "macos", hex_capture))]
+    ("mac-paste-picker", |ui| {
+        *ui = mac_fixture();
+        ui.settings.labs.paste_last_picker = true;
+        ui.paste_preview = paste_picker::Preview::capture();
+    }),
+    // A dictation selected: its whole text in the preview.
+    #[cfg(all(target_os = "macos", hex_capture))]
+    ("mac-paste-picker-dictation", |ui| {
+        *ui = mac_fixture();
+        ui.settings.labs.paste_last_picker = true;
+        ui.paste_preview = paste_picker::Preview::dictation();
     }),
     #[cfg(all(target_os = "macos", hex_capture))]
     ("mac-history-empty", |ui| {
@@ -214,6 +255,14 @@ pub(super) const SCENES: &[Scene] = &[
         *ui = portal_fixture();
         ui.pane = Pane::Output;
     }),
+    // Labs › Dictation style on: its row sits above Every dictation.
+    ("output-style", |ui| {
+        *ui = portal_fixture();
+        output::fixture(ui);
+        ui.settings.labs.dictation_style = true;
+        ui.settings.labs.dictation_style_choice = crate::app_settings::DictationStyle::Notes;
+        ui.pane = Pane::Output;
+    }),
     ("modes", |ui| {
         *ui = portal_fixture();
         modes::fixture(ui);
@@ -244,19 +293,6 @@ pub(super) const SCENES: &[Scene] = &[
         *ui = portal_fixture();
         modes::fixture(ui);
         ui.open = Some(Menu::Transformations);
-        ui.pane = Pane::Modes;
-    }),
-    // Labs › Switch model with app: each mode's speech model and language.
-    ("modes-speech", |ui| {
-        *ui = mac_fixture();
-        modes::fixture(ui);
-        ui.settings.labs.app_model_switching = true;
-        ui.settings.dictation_processing.modes[0].speech =
-            Some(crate::app_settings::KeyboardModelChoice {
-                model: TranscriptionModelId::ParakeetV3,
-                language: "es".into(),
-            });
-        ui.picker.installed = Some(vec![TranscriptionModelId::ParakeetV3]);
         ui.pane = Pane::Modes;
     }),
     ("picker", |ui| {
@@ -486,7 +522,8 @@ pub(super) const SCENES: &[Scene] = &[
             TranscriptionModelId::ParakeetV3,
         ]);
     }),
-    // The sound sets sheet at rest, then Wood's dictation recording.
+    // The sound sets sheet at rest, then Wood's dictation playing with the
+    // sounds off.
     ("sound-sets", |ui| {
         *ui = mac_fixture();
         sound_sets::fixture(ui, None);
@@ -494,14 +531,7 @@ pub(super) const SCENES: &[Scene] = &[
     ("sound-sets-playing", |ui| {
         *ui = mac_fixture();
         ui.settings.sound_effects = false;
-        sound_sets::fixture(
-            ui,
-            Some((
-                crate::feedback::SoundSet::Wood,
-                crate::feedback::Audition::Dictation,
-                900.0,
-            )),
-        );
+        sound_sets::fixture(ui, Some(crate::feedback::SoundSet::Wood));
     }),
     ("mac-microphone-missing", |ui| {
         *ui = mac_fixture();
@@ -590,10 +620,13 @@ pub(super) const SCENES: &[Scene] = &[
         *ui = mac_fixture();
         ui.settings.updates.channel = Some(crate::app_settings::UpdateChannel::Dev);
     }),
-    // A local build: the badge, the quiet status line, no channel row.
+    // Pin both parts of an actual local build, independent of the render host.
     ("mac-local-build", |ui| {
         *ui = mac_fixture();
-        ui.build_preview = Some(BuildKind::Local);
+        ui.build_preview = Some(BuildKind::Local {
+            version: "3.4.0",
+            commit: Some("fc837db2a56858eeef61411c97737d2435e60a88"),
+        });
         if let Some(view) = &mut ui.view {
             view.update_status = DesktopUpdateStatus::SourceBuild;
         }
@@ -634,6 +667,24 @@ pub(super) const SCENES: &[Scene] = &[
         *ui = mac_fixture();
         ui.meetings.view = meetings::View::Settings;
         ui.pane = Pane::Meetings;
+        calls_fixture(ui, false);
+    }),
+    // The Calls sheet: Ask each time for every call, Slack huddles
+    // recording automatically, a website not offered, and the calls Hex
+    // has seen, newest first.
+    ("meetings-calls", |ui| {
+        *ui = mac_fixture();
+        ui.meetings.view = meetings::View::Settings;
+        ui.pane = Pane::Meetings;
+        calls_fixture(ui, true);
+    }),
+    // Before Hex has seen a call or saved an answer.
+    ("meetings-calls-empty", |ui| {
+        *ui = mac_fixture();
+        ui.meetings.view = meetings::View::Settings;
+        ui.pane = Pane::Meetings;
+        ui.settings.meetings.providers.clear();
+        calls::fixture(ui, Vec::new(), CALLS_NOW_MS, true);
     }),
     // Summaries' picker open: Off, On this Mac, OpenCode, each saying what
     // it does; then with Apple Intelligence off, On this Mac kept, disabled,
@@ -700,6 +751,43 @@ pub(super) const SCENES: &[Scene] = &[
         ui.meetings.delete_armed = Some("preview-notes".into());
         ui.pane = Pane::Meetings;
     }),
+    // Labs › Delete transcript lines: two saved turns checked, the bar
+    // asking, then its one confirmation.
+    ("meetings-select", |ui| {
+        *ui = mac_fixture();
+        ui.settings.labs.transcript_edits = true;
+        ui.meetings.selection.select_lines(&[
+            crate::meeting::TranscriptEntryKey {
+                source: crate::meeting::MeetingSource::System,
+                start_ms: 1_000,
+                end_ms: 2_000,
+            },
+            crate::meeting::TranscriptEntryKey {
+                source: crate::meeting::MeetingSource::Microphone,
+                start_ms: 9_000,
+                end_ms: 10_000,
+            },
+        ]);
+        ui.pane = Pane::Meetings;
+    }),
+    ("meetings-select-confirm", |ui| {
+        *ui = mac_fixture();
+        ui.settings.labs.transcript_edits = true;
+        ui.meetings.selection.select_lines(&[
+            crate::meeting::TranscriptEntryKey {
+                source: crate::meeting::MeetingSource::System,
+                start_ms: 1_000,
+                end_ms: 2_000,
+            },
+            crate::meeting::TranscriptEntryKey {
+                source: crate::meeting::MeetingSource::Microphone,
+                start_ms: 9_000,
+                end_ms: 10_000,
+            },
+        ]);
+        ui.meetings.selection.delete_armed = true;
+        ui.pane = Pane::Meetings;
+    }),
     ("meetings-rename", |ui| {
         *ui = mac_fixture();
         ui.meetings.renaming = Some("preview-notes".into());
@@ -716,6 +804,16 @@ pub(super) const SCENES: &[Scene] = &[
         ui.meetings = meetings::MeetingsPane::chapters_fixture();
         ui.pane = Pane::Meetings;
     }),
+    ("meetings-audio-off", |ui| {
+        *ui = mac_fixture();
+        ui.platform.system_audio = false;
+        ui.pane = Pane::Meetings;
+    }),
+    ("meetings-off-sidebar", |ui| {
+        *ui = mac_fixture();
+        ui.settings.meetings.enabled = false;
+        ui.pane = Pane::Meetings;
+    }),
     ("meetings-empty", |ui| {
         *ui = mac_fixture();
         ui.meetings = meetings::MeetingsPane::default();
@@ -725,6 +823,22 @@ pub(super) const SCENES: &[Scene] = &[
     ("mac-scrawl-off", |ui| scrawl_fixture(ui, false, |_| {})),
     #[cfg(hex_capture)]
     ("mac-scrawl", |ui| scrawl_fixture(ui, true, |_| {})),
+    #[cfg(hex_capture)]
+    ("mac-routing-rules", |ui| {
+        scrawl_fixture(ui, true, |_| {});
+        scrawl::routing_rules::fixture(ui, true, false);
+    }),
+    #[cfg(hex_capture)]
+    ("mac-routing-add", |ui| {
+        scrawl_fixture(ui, true, |_| {});
+        scrawl::routing_rules::fixture(ui, true, true);
+    }),
+    #[cfg(hex_capture)]
+    ("mac-scrawl-open", |ui| {
+        scrawl_fixture(ui, true, |view| view.how_it_works = true);
+        ui.advanced.push(Pane::Annotate);
+        ui.settings.labs.annotate_replay = true;
+    }),
     #[cfg(hex_capture)]
     ("mac-scrawl-running", |ui| {
         scrawl_fixture(ui, true, |view| view.scrawl_running = true)
@@ -739,6 +853,14 @@ pub(super) const SCENES: &[Scene] = &[
             view.screen_recording = false;
             view.screen_needs_restart = true;
         })
+    }),
+    // Labs › Install agent skill from Annotate: every agent state, the
+    // copyable skills command, and the Command-line tool.
+    #[cfg(hex_capture)]
+    ("mac-scrawl-agents", |ui| {
+        scrawl_fixture(ui, true, |_| {});
+        ui.settings.labs.annotate_agent_install = true;
+        ui.agents = scrawl::Agents::fixture();
     }),
     ("mac-voice-filter", |ui| {
         *ui = mac_fixture();
@@ -796,11 +918,11 @@ pub(super) const SCENES: &[Scene] = &[
         ui.pane = Pane::HudLab;
     }),
     ("mac-labs", labs_with_some_on),
-    // Where hex://labs/vocabulary-biasing lands: its group's chip.
+    // Where hex://labs/live-text lands: its group's chip.
     ("mac-labs-link", |ui| {
         *ui = mac_fixture();
         ui.labs_open = true;
-        ui.lab_store.group = Some(crate::labs::Feature::VocabularyBiasing.group());
+        ui.lab_store.group = Some(crate::labs::Feature::LiveText.group());
     }),
     ("mac-labs-on", |ui| {
         labs_with_some_on(ui);
@@ -967,6 +1089,7 @@ fn scrawl_fixture(ui: &mut Ui, enabled: bool, adjust: fn(&mut platform::ScrawlVi
     let mut view = platform::ScrawlView::preview();
     adjust(&mut view);
     ui.platform.scrawl = Some(view);
+    ui.captures.view = scrawl::View::Settings;
     ui.pane = Pane::Annotate;
 }
 
@@ -983,6 +1106,39 @@ fn unified_history(ui: &mut Ui) {
     ui.history.reload(ui.settings.labs.history_stats);
     ui.captures = captures::CapturesPane::fixture();
     ui.pane = Pane::History;
+}
+
+/// Saturday, 21 November 2026, 12:00 UTC: the Calls fixtures' now.
+const CALLS_NOW_MS: i64 = 1_795_262_400_000;
+
+/// Calls Hex saw: Slack and Zoom with their catalog icons, Google Meet's
+/// website, and one other website.
+fn calls_fixture(ui: &mut Ui, open: bool) {
+    use crate::meeting::seen_calls::SeenCall;
+    let hour = 60 * 60 * 1000;
+    let seen = |key: &str, label: &str, application: Option<&str>, ago: i64| SeenCall {
+        key: key.into(),
+        label: label.into(),
+        application: application.map(Into::into),
+        last_seen_ms: CALLS_NOW_MS - ago * hour,
+    };
+    modes::fixture_call_catalog(ui);
+    calls::fixture(
+        ui,
+        vec![
+            seen(
+                "com.tinyspeck.slackmacgap",
+                "Slack huddles",
+                Some("com.tinyspeck.slackmacgap"),
+                2,
+            ),
+            seen("us.zoom.xos", "Zoom", Some("us.zoom.xos"), 26),
+            seen("meet.google.com", "Google Meet", None, 50),
+            seen("calls.example.org", "calls.example.org", None, 24 * 9),
+        ],
+        CALLS_NOW_MS,
+        open,
+    );
 }
 
 pub(super) fn mac_fixture() -> Ui {
@@ -1106,6 +1262,7 @@ pub(super) fn fixture(shortcuts: DesktopShortcuts) -> Ui {
             preparation_stage: None,
             selection: ui.settings.transcription.clone(),
             preparing: None,
+            backend: None,
         },
         update_status: DesktopUpdateStatus::Current,
         update_notes: None,

@@ -166,6 +166,23 @@ fn the_offer_keeps_its_corner_controls_and_clear_input_margin() {
 }
 
 #[test]
+fn the_offers_buttons_take_the_pointer_while_its_body_grabs() {
+    let (mut rt, _, _) = runtime(offer(slack_huddle()), false, true, PANEL);
+    landed(&mut rt);
+    for key in ["offer-more", "not-now", "record"] {
+        let (x, y) = rt.find(key).unwrap();
+        rt.pointer_move(x, y);
+        rt.frame(1. / 60.);
+        assert_eq!(rt.cursor(), Cursor::Pointer, "{key}");
+    }
+    // Between the name and its buttons the capsule itself drags.
+    let (x, y) = rt.find("title").unwrap();
+    rt.pointer_move(x, y);
+    rt.frame(1. / 60.);
+    assert_eq!(rt.cursor(), Cursor::Grab);
+}
+
+#[test]
 fn the_offer_has_no_default_key_and_names_each_focus_target() {
     let key = |rt: &mut Runtime<Capsule>, key| {
         rt.key(rune::KeyEvent {
@@ -195,7 +212,7 @@ fn the_offer_has_no_default_key_and_names_each_focus_target() {
         assert!(commands.try_recv().is_err());
         key(&mut rt, rune::Key::Text(" ".into()));
         match tabs {
-            1 => assert!(rt.state.more_open),
+            1 => assert!(rt.state.more_open()),
             2 => assert!(matches!(
                 commands.try_recv(),
                 Ok(ControllerCommand::Dismiss)
@@ -318,7 +335,13 @@ fn a_record_click_keeps_its_corner_until_the_worker_is_live() {
                         let mut model = PillModel::default();
                         model.apply(&event, Instant::now());
                         let r = model.pill(true).unwrap().clone();
-                        rt.update(move |c, tx| c.start_recording(r, tx));
+                        rt.update(move |c, tx| {
+                            let anchor = Anchor {
+                                corner: c.corner,
+                                display: c.display.clone(),
+                            };
+                            c.start_recording(r, anchor, tx);
+                        });
                     }
                     if [1, started_frame + 50].contains(&frame) {
                         rt.pointer_down(x, y);
@@ -358,7 +381,7 @@ fn a_record_click_keeps_its_corner_until_the_worker_is_live() {
                             assert!(texts(&rt).contains(&tr("Starting…").to_owned()));
                         }
                     }
-                    assert!(rt.find("stop").is_none() && !rt.state.hovered);
+                    assert!(rt.find("stop").is_none() && !rt.state.hovered());
                     assert!(commands.try_recv().is_err());
                     last = (w, h);
                 }
@@ -376,8 +399,8 @@ fn a_record_click_keeps_its_corner_until_the_worker_is_live() {
 #[test]
 fn pending_offers_never_mask_a_failure_or_adopt_another_start() {
     use offer::{Host, Route};
-    let id = OfferId::at(Instant::now());
-    let other = OfferId::at(Instant::now() + Duration::from_secs(1));
+    let id = OfferId::next();
+    let other = OfferId::next();
     let failed = ControllerEvent::Failed {
         title: "Fixture".into(),
         error: "Permission denied".into(),
@@ -408,5 +431,53 @@ fn pending_offers_never_mask_a_failure_or_adopt_another_start() {
     tap(&mut rt, "record");
     assert!(!rt.state.presentation.inherits_offer_window());
     assert!(rt.find("record").is_some() && rt.find("elapsed").is_none());
+}
+
+#[test]
+fn an_offer_started_recording_stopped_without_hovering_still_pauses_the_ready_panel_on_hover() {
+    let (mut rt, _commands, _) = runtime(offer(slack_huddle()), false, false, PANEL);
+    tap(&mut rt, "record");
+    assert!(
+        rt.state.presentation.hold_hover,
+        "pressing Record holds hover while contracting to the recording pill"
+    );
+    rt.update(|c, tx| {
+        c.start_recording(
+            Recording {
+                id: "offer-ready".into(),
+                title: "Slack Huddle".into(),
+                started: Instant::now(),
+                automatic: false,
+                warning: None,
+            },
+            Anchor::default(),
+            tx,
+        );
+    });
+    // Stop from menu bar / pane / CLI without ever hovering the pill.
+    let Kind::Ready(manifest) = ready_transcript() else {
+        unreachable!()
+    };
+    rt.update(move |c, tx| {
+        c.capture_stopped();
+        assert!(!c.presentation.hold_hover);
+        c.published(manifest);
+        assert!(!c.presentation.hold_hover);
+        c.stir(tx);
+    });
+    // Hovering the finished panel must register and pause the stay ring.
+    rt.update(|c, tx| {
+        c.set_hovered(true);
+        c.wake_for_stay(tx);
+    });
+    assert!(rt.state.hovered());
+    assert!(matches!(
+        &rt.state.state,
+        State::Ready {
+            hover: ReadyHover::Hovered,
+            stay,
+            ..
+        } if !stay.running()
+    ));
 }
 

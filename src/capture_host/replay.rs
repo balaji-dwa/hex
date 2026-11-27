@@ -44,8 +44,8 @@ use serde::Serialize;
 use super::{AudioTimeline, FinishJob, SharedOutcomes};
 #[cfg(target_os = "macos")]
 use super::{
-    CaptureAudio, ChosenTranscriber, End, Sealed, Stage, TargetKind, Written, hex_engine_config,
-    lock, new_bundle_dir, remove_bundle, routing,
+    CaptureAudio, CaptureEnd, ChosenTranscriber, End, Sealed, Stage, TargetKind, Written,
+    hex_engine_config, lock, new_bundle_dir, remove_bundle, routing,
 };
 use crate::audio::CaptureInstant;
 use crate::control::ControlReply;
@@ -356,7 +356,7 @@ impl Controller {
             {
                 let mut out = lock(outcomes);
                 out.held = true;
-                out.started(bundle.clone(), now, TargetKind::Display);
+                out.start(bundle.clone(), now, TargetKind::Display, false);
                 out.stopped(&bundle, End::Finish);
                 out.release();
             }
@@ -376,7 +376,7 @@ impl Controller {
             let job = FinishJob {
                 bundle: bundle.clone(),
                 capture: sealed,
-                audio: RecordedAudio::default(),
+                audio: Some(RecordedAudio::default()),
                 look,
             };
             match jobs.try_send(job) {
@@ -389,7 +389,7 @@ impl Controller {
                 }
                 Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
                     job.capture.cancel();
-                    lock(outcomes).settle(bundle, Stage::Cancelled, None);
+                    lock(outcomes).settle(bundle, CaptureEnd::Cancelled);
                     Err(ControlReply::error(
                         "busy",
                         "Capture finish queue is full; try again shortly",
@@ -469,7 +469,7 @@ impl Controller {
         {
             let mut out = lock(outcomes);
             out.held = true;
-            out.started(bundle.clone(), press_at, TargetKind::Display);
+            out.start(bundle.clone(), press_at, TargetKind::Display, false);
             out.progress(&bundle, Stage::Recording);
             out.release();
         }
@@ -525,7 +525,7 @@ impl Controller {
         lock(outcomes).stopped(&active.bundle, End::Finish);
         let Some(jobs) = finisher else {
             remove_bundle(&active.bundle);
-            lock(outcomes).settle(active.bundle, Stage::Cancelled, None);
+            lock(outcomes).settle(active.bundle, CaptureEnd::Cancelled);
             return;
         };
         let sealed = Box::new(SealedReplay {
@@ -541,7 +541,7 @@ impl Controller {
         let job = FinishJob {
             bundle: active.bundle.clone(),
             capture: sealed,
-            audio: recorded,
+            audio: Some(recorded),
             look,
         };
         match jobs.try_send(job) {
@@ -552,7 +552,7 @@ impl Controller {
             }
             Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
                 job.capture.cancel();
-                lock(outcomes).settle(active.bundle, Stage::Cancelled, None);
+                lock(outcomes).settle(active.bundle, CaptureEnd::Cancelled);
             }
         }
     }
@@ -581,7 +581,7 @@ impl Controller {
         let _ = audio.close_sink(now);
         lock(outcomes).stopped(&active.bundle, end);
         remove_bundle(&active.bundle);
-        lock(outcomes).settle(active.bundle, Stage::Cancelled, None);
+        lock(outcomes).settle(active.bundle, CaptureEnd::Cancelled);
     }
 
     #[cfg(target_os = "macos")]
@@ -831,7 +831,10 @@ impl Sealed for SealedReplay {
         remove_bundle(&self.bundle);
     }
 
-    fn finish(self: Box<Self>, audio: RecordedAudio) -> anyhow::Result<Written> {
+    fn finish(self: Box<Self>, audio: Option<RecordedAudio>) -> anyhow::Result<Written> {
+        // A replay always copies the dictation timeline.
+        let audio = audio
+            .unwrap_or_else(|| RecordedAudio::new(Vec::new(), super::SAMPLE_RATE, 0, Vec::new()));
         let result = self.finish_inner(audio);
         if result.is_err() {
             remove_bundle(&self.bundle);

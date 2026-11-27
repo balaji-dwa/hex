@@ -22,12 +22,14 @@ single gate at the point work starts. Reuse the existing registry; do not add
 a parallel Labs framework or master switch. The places a new lab reaches are:
 
 - `src/app_settings/labs.rs`: its persisted boolean, explicitly false by default.
-- `src/labs/feature.rs`, `catalog.rs`, `card.rs`, `description.rs`, `group.rs`:
-  registry entry, stable name, audience, OS availability, text, and group.
-- `src/labs.rs` and `src/labs/gates.rs`: setting read/write, runtime state, gate.
+- `src/labs/feature.rs`: one `define_features!` row with its settings field,
+  stable name, group, audience, OS availability, and join date.
+- `src/labs/card.rs` and `description.rs`: the card's title, line, and description.
+- `src/labs/gates.rs`: the runtime gate, if the work starts outside the window.
 - `src/control/settings/`: the corresponding `hex settings` key.
 - Its worker/caller and `src/rune_ui/labs.rs` if the existing generic card is
-  insufficient; translated strings in `src/desktop/i18n/`.
+  insufficient; translated strings in `src/desktop/i18n/` (this fork's French, Portuguese,
+  Russian, and Hungarian rows live in `personal_labs.rs`).
 - A focused off/on test, including the off path doing no work, and the
   affected feature map. Update UI goldens on Linux if the drawn UI changes.
 

@@ -1,7 +1,8 @@
 //! Shortcut keys a Labs feature allows, and the repair that puts a saved
 //! shortcut on one back while the feature is off: mouse buttons (Labs ›
 //! Mouse shortcuts, macOS), Menu, Pause, or Scroll Lock (Labs › Special
-//! keys alone, Linux), the ISO section key (Labs › § key alone, Linux
+//! keys alone, Linux), a navigation key alone (the same Lab,
+//! Windows), the ISO section key (Labs › § key alone, Linux
 //! and macOS), the microphone key (Labs › Microphone key alone, macOS),
 //! shortcuts without a key (Labs › Double-tap Option, Command, or
 //! Globe, macOS), and the persisted double-tap mode those need.
@@ -62,6 +63,22 @@ impl HotkeyKey {
                 .as_str(),
             "insert" | "home" | "end" | "pageup" | "pagedown"
         )
+    }
+
+    /// Whether `name` names Caps Lock: `capslock`, `caps_lock`, or
+    /// `Caps Lock`.
+    pub fn caps_lock_name(name: &str) -> bool {
+        name.trim()
+            .replace([' ', '_'], "")
+            .eq_ignore_ascii_case("capslock")
+    }
+
+    /// Whether `label` names a function key (`F1`–`F20`, any case).
+    pub fn is_function_name(label: &str) -> bool {
+        label
+            .strip_prefix(['F', 'f'])
+            .and_then(|number| number.parse::<u8>().ok())
+            .is_some_and(|number| (1..=20).contains(&number))
     }
 }
 
@@ -161,22 +178,11 @@ impl AppSettings {
     /// With Labs › Microphone key alone off, a macOS shortcut on the
     /// microphone key, with or without a modifier, goes back to its default
     /// (an optional one is unbound), so the listener never registers one.
-    /// The cancel and screenshot shortcuts are not in `reset_shortcuts`, so
-    /// they are reset here too.
     pub(crate) fn repair_microphone_key(&mut self) {
         if self.microphone_key_allowed() || !cfg!(target_os = "macos") {
             return;
         }
-        let mut reset = self.reset_shortcuts(HotkeyBinding::uses_microphone_key);
-        if self.cancel_hotkey.uses_microphone_key() {
-            self.cancel_hotkey = HotkeyBinding::cancel_default();
-            reset = true;
-        }
-        if self.screenshots.hotkey.uses_microphone_key() {
-            self.screenshots.hotkey = HotkeyBinding::screenshot_default();
-            reset = true;
-        }
-        if reset {
+        if self.reset_shortcuts(HotkeyBinding::uses_microphone_key) {
             tracing::info!("reset microphone-key shortcuts: Labs › Microphone key alone is off");
         }
     }
@@ -254,63 +260,6 @@ impl AppSettings {
             &mut self.paste_last_hotkey,
             "Paste last dictation",
         );
-    }
-
-    /// Puts back every shortcut `matches`: dictation, Paste last dictation,
-    /// and Annotate to their defaults, the optional ones unbound. Returns
-    /// whether any changed.
-    fn reset_shortcuts(&mut self, matches: impl Fn(&HotkeyBinding) -> bool) -> bool {
-        let mut reset = false;
-        if matches(&self.dictation_hotkey) {
-            self.dictation_hotkey = HotkeyBinding::default();
-            reset = true;
-        }
-        if self.paste_last_hotkey.as_ref().is_some_and(&matches) {
-            self.paste_last_hotkey = Some(HotkeyBinding::paste_last_default());
-            reset = true;
-        }
-        if self.raw_dictation_hotkey.as_ref().is_some_and(&matches) {
-            self.raw_dictation_hotkey = None;
-            reset = true;
-        }
-        if self.typed_text_hotkey.as_ref().is_some_and(&matches) {
-            self.typed_text_hotkey = None;
-            reset = true;
-        }
-        if self.second_dictation_hotkey.as_ref().is_some_and(&matches) {
-            self.second_dictation_hotkey = None;
-            reset = true;
-        }
-        for row in &mut self.extra_dictation_hotkeys {
-            if row.binding.as_ref().is_some_and(&matches) {
-                row.binding = None;
-                reset = true;
-            }
-        }
-        if self.terminal_paste_hotkey.as_ref().is_some_and(&matches) {
-            self.terminal_paste_hotkey = None;
-            reset = true;
-        }
-        #[cfg(hex_capture)]
-        if matches(&self.capture.hotkey) {
-            self.capture.hotkey = HotkeyBinding::capture_default();
-            reset = true;
-        }
-        #[cfg(hex_capture)]
-        if self.capture.replay_hotkey.as_ref().is_some_and(&matches) {
-            self.capture.replay_hotkey = None;
-            reset = true;
-        }
-        if self
-            .screenshots
-            .record_hotkey
-            .as_ref()
-            .is_some_and(&matches)
-        {
-            self.screenshots.record_hotkey = None;
-            reset = true;
-        }
-        reset
     }
 }
 
@@ -391,6 +340,81 @@ mod tests {
             crate::dictation::ShortcutMode::Hold,
             "the mode returns to Hold or double-tap"
         );
+    }
+
+    #[test]
+    fn caps_lock_names_are_not_labs_gated_special_or_navigation_keys() {
+        for name in ["capslock", "caps_lock", "Caps Lock", " caps lock "] {
+            assert!(HotkeyKey::caps_lock_name(name), "{name}");
+            let key = HotkeyKey::named(name);
+            assert_eq!(key.label, "Caps Lock");
+            assert!(!key.is_special());
+            assert!(!key.is_navigation());
+        }
+        assert!(!HotkeyKey::caps_lock_name("scroll lock"));
+    }
+
+    #[test]
+    fn special_keys_lab_off_keeps_caps_lock_and_repairs_only_windows_navigation() {
+        for name in ["capslock", "insert", "home", "end", "pageup", "pagedown"] {
+            let binding = HotkeyBinding {
+                modifiers: Default::default(),
+                key: Some(HotkeyKey::named(name)),
+            };
+            let mut settings = AppSettings {
+                dictation_hotkey: binding.clone(),
+                raw_dictation_hotkey: Some(binding.clone()),
+                ..Default::default()
+            };
+            settings.labs.standalone_special_keys = true;
+            settings.repair_special_keys();
+            assert_eq!(settings.dictation_hotkey, binding);
+            crate::labs::Feature::StandaloneSpecialKeys.set(&mut settings, false);
+            settings.repair_special_keys();
+            if cfg!(target_os = "windows") && name != "capslock" {
+                assert_eq!(
+                    settings.dictation_hotkey,
+                    HotkeyBinding::default(),
+                    "{name}"
+                );
+                assert_eq!(settings.raw_dictation_hotkey, None, "{name}");
+            } else {
+                assert_eq!(settings.dictation_hotkey, binding, "{name}");
+                assert_eq!(settings.raw_dictation_hotkey, Some(binding), "{name}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn caps_lock_survives_save_and_load_with_the_special_keys_lab_off() {
+        let sequence = crate::app_settings::SETTINGS_TEMP_SEQUENCE
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "hex-caps-lock-settings-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        for name in ["capslock", "insert", "home", "end", "pageup", "pagedown"] {
+            let binding = HotkeyBinding {
+                modifiers: Default::default(),
+                key: Some(HotkeyKey::named(name)),
+            };
+            let settings = AppSettings {
+                dictation_hotkey: binding.clone(),
+                ..Default::default()
+            };
+            settings.write_to(&path).unwrap();
+            let loaded = AppSettings::load_from(&path).unwrap();
+            assert!(!loaded.labs.standalone_special_keys);
+            if name == "capslock" {
+                assert_eq!(loaded.dictation_hotkey, binding);
+            } else {
+                assert_eq!(loaded.dictation_hotkey, HotkeyBinding::default(), "{name}");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
