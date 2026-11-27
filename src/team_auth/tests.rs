@@ -227,6 +227,122 @@ fn cancelling_the_browser_wait_never_writes_a_session() {
     assert!(!client.store.exists());
 }
 
+/// Signs in against `server`, then leaves a stale access token behind, as
+/// if another Hex process or an expired token got there first.
+fn signed_in_with_stale_token(server: &Mock, fixture: &TempDir) -> Client {
+    let client = Client::new(fixture.0.join("session.json"), &server.origin, None).unwrap();
+    let (open, page) = browser();
+    assert_member(client.sign_in(&AtomicBool::new(false), open).unwrap());
+    page.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut stored = client.load().unwrap().unwrap();
+    stored.access_token = "stale-access".into();
+    session::save(&client.store, &stored).unwrap();
+    client
+}
+
+#[test]
+fn concurrent_rejections_share_one_refresh() {
+    let fixture = TempDir::new();
+    let server = Mock::start();
+    let client = Arc::new(signed_in_with_stale_token(&server, &fixture));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let (client, cancel, barrier) = (client.clone(), cancel.clone(), barrier.clone());
+            thread::spawn(move || {
+                barrier.wait();
+                client
+                    .send_authorized(
+                        "member-id",
+                        "/api/hex/tasks?since=0&limit=50",
+                        None,
+                        &cancel,
+                    )
+                    .map(|response| response.status().as_u16())
+            })
+        })
+        .collect();
+    for thread in threads {
+        assert_eq!(thread.join().unwrap(), Ok(200));
+    }
+    let state = server.state.lock().unwrap();
+    // A second refresh would have sent the rotated-away refresh token,
+    // which the mock refuses with a panic.
+    assert_eq!(state.refreshes, 1);
+    assert!(
+        state
+            .tasks
+            .iter()
+            .all(|(token, _)| token == "Bearer stale-access" || token == "Bearer access-1")
+    );
+    drop(state);
+    assert!(client.load().unwrap().unwrap().access_token == "access-1");
+}
+
+#[test]
+fn an_access_login_redirect_refreshes_and_resends_the_same_body() {
+    let fixture = TempDir::new();
+    let server = Mock::start();
+    let client = Client::new(fixture.0.join("session.json"), &server.origin, None).unwrap();
+    let (open, page) = browser();
+    assert_member(client.sign_in(&AtomicBool::new(false), open).unwrap());
+    page.recv_timeout(Duration::from_secs(5)).unwrap();
+    server.state.lock().unwrap().redirect_access_login = true;
+    let body = br#"{"idempotencyKey":"same-key","origin":"dictation","text":"hi","files":[]}"#;
+    let response = client
+        .send_authorized(
+            "member-id",
+            "/api/hex/tasks",
+            Some(body),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.refreshes, 1);
+    assert_eq!(state.tasks.len(), 2);
+    assert_eq!(state.tasks[0].0, "Bearer first-access");
+    assert_eq!(state.tasks[1].0, "Bearer access-1");
+    assert!(state.tasks.iter().all(|(_, sent)| sent == body));
+}
+
+#[test]
+fn a_bearer_still_rejected_after_refresh_needs_sign_in() {
+    let fixture = TempDir::new();
+    let server = Mock::start();
+    let client = signed_in_with_stale_token(&server, &fixture);
+    server.state.lock().unwrap().reject_tasks = true;
+    let cancel = AtomicBool::new(false);
+    assert_eq!(
+        client
+            .send_authorized("member-id", "/api/hex/tasks", None, &cancel)
+            .err(),
+        Some(AuthError::Refresh)
+    );
+    // Another account's session, or another origin, is never sent.
+    assert_eq!(
+        client
+            .send_authorized("someone-else", "/api/hex/tasks", None, &cancel)
+            .err(),
+        Some(AuthError::Refresh)
+    );
+    assert_eq!(
+        client
+            .send_authorized("member-id", "https://evil.example/api", None, &cancel)
+            .err(),
+        Some(AuthError::Configuration)
+    );
+    cancel.store(true, Ordering::Release);
+    assert_eq!(
+        client
+            .send_authorized("member-id", "/api/hex/tasks", None, &cancel)
+            .err(),
+        Some(AuthError::Cancelled)
+    );
+    assert_eq!(server.state.lock().unwrap().tasks.len(), 2);
+}
+
 fn assert_member(state: AuthState) {
     assert!(matches!(
         state,
@@ -307,6 +423,10 @@ struct MockState {
     code_exchanges: usize,
     refreshes: usize,
     verifications: usize,
+    /// `/api/hex/tasks` rejects every bearer, even a fresh one.
+    reject_tasks: bool,
+    /// Each `/api/hex/tasks` request's bearer and body.
+    tasks: Vec<(String, Vec<u8>)>,
 }
 
 impl Mock {
@@ -329,6 +449,8 @@ impl Mock {
             code_exchanges: 0,
             refreshes: 0,
             verifications: 0,
+            reject_tasks: false,
+            tasks: Vec::new(),
         }));
         let server_state = Arc::clone(&state);
         let stop = Arc::new(AtomicBool::new(false));
@@ -583,6 +705,30 @@ impl MockState {
                         }),
                     );
                 }
+            }
+            (_, "/api/hex/tasks") => {
+                let token = headers.get("authorization").cloned().unwrap_or_default();
+                self.tasks.push((token.clone(), data));
+                let expected = if self.refreshes == 0 {
+                    "Bearer first-access".into()
+                } else {
+                    format!("Bearer access-{}", self.refreshes)
+                };
+                if self.redirect_access_login {
+                    return respond(
+                        stream,
+                        "302 Found",
+                        &[(
+                            "Location",
+                            "https://slipstream-advisors.cloudflareaccess.com/cdn-cgi/access/login/hex.theslipstreamadvisors.com",
+                        )],
+                        &json!({}),
+                    );
+                }
+                if self.reject_tasks || token != expected {
+                    return respond(stream, "401 Unauthorized", &[], &json!({}));
+                }
+                respond(stream, "200 OK", &[], &json!({"cursor": 0, "tasks": []}));
             }
             _ => panic!("unexpected OAuth route"),
         }

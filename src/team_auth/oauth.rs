@@ -271,7 +271,7 @@ pub(super) fn whoami(origin: &Url, access_token: &str) -> Result<Option<Member>,
         .header("Authorization", format!("Bearer {access_token}"))
         .call()
         .map_err(|_| AuthError::Service)?;
-    if response.status().as_u16() == 401 || is_access_login_redirect(&response) {
+    if access_rejected(&response) {
         return Ok(None);
     }
     let member: Member = decode(response, AuthError::Verification)?;
@@ -282,6 +282,10 @@ pub(super) fn whoami(origin: &Url, access_token: &str) -> Result<Option<Member>,
         return Err(AuthError::Verification);
     }
     Ok(Some(member))
+}
+
+pub(super) fn access_rejected(response: &Response<Body>) -> bool {
+    response.status().as_u16() == 401 || is_access_login_redirect(response)
 }
 
 fn is_access_login_redirect(response: &Response<Body>) -> bool {
@@ -323,11 +327,15 @@ fn join(origin: &Url, path: &str) -> Result<Url, AuthError> {
 }
 
 fn agent(url: &Url) -> ureq::Agent {
+    agent_with_timeout(url, Duration::from_secs(12))
+}
+
+pub(super) fn agent_with_timeout(url: &Url, timeout: Duration) -> ureq::Agent {
     let config = |builder: crate::net::Config| {
         builder
             .max_redirects(0)
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(12)))
+            .timeout_global(Some(timeout))
     };
     if url.scheme() == "http" {
         crate::net::loopback_agent(config)

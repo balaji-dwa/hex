@@ -9,13 +9,15 @@ mod tests;
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use session::StoredSession;
 use url::Url;
 
 const DEFAULT_ORIGIN: &str = "https://hex.theslipstreamadvisors.com";
+static REFRESH: Mutex<()> = Mutex::new(());
 pub(crate) const REFRESH_WINDOW_MS: u64 = 60_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,7 +87,11 @@ impl Client {
         )
     }
 
-    fn new(store: PathBuf, origin: &str, client_id: Option<String>) -> Result<Self, AuthError> {
+    pub(crate) fn new(
+        store: PathBuf,
+        origin: &str,
+        client_id: Option<String>,
+    ) -> Result<Self, AuthError> {
         Ok(Self {
             store,
             origin: oauth::origin(origin)?,
@@ -106,7 +112,10 @@ impl Client {
             cached,
             cancelled,
             open,
-            |session| self.save(session, cancelled),
+            |session| {
+                let _refresh = REFRESH.lock().map_err(|_| AuthError::Storage)?;
+                self.save(session, cancelled)
+            },
         )?;
         Ok(signed_in(session))
     }
@@ -127,10 +136,7 @@ impl Client {
     }
 
     fn whoami(&self, session: &mut StoredSession, cancelled: &AtomicBool) -> Result<(), AuthError> {
-        let due = session
-            .access_expires_at_ms
-            .is_some_and(|expires| expires <= now_ms().saturating_add(REFRESH_WINDOW_MS));
-        let member = if due {
+        let member = if refresh_due(session) {
             None
         } else {
             check_cancelled(cancelled)?;
@@ -139,10 +145,7 @@ impl Client {
         let member = match member {
             Some(member) => member,
             None => {
-                check_cancelled(cancelled)?;
-                oauth::refresh(&self.origin, session)?;
-                // Save rotated credentials before another request can fail.
-                self.save(session, cancelled)?;
+                *session = self.refresh(session, cancelled)?;
                 check_cancelled(cancelled)?;
                 oauth::whoami(&self.origin, &session.access_token)?.ok_or(AuthError::Refresh)?
             }
@@ -151,13 +154,107 @@ impl Client {
             return Err(AuthError::Verification);
         }
         if member.email != session.email {
-            session.email = member.email;
-            self.save(session, cancelled)?;
+            let _refresh = REFRESH.lock().map_err(|_| AuthError::Storage)?;
+            let mut current = self.load_member(&session.member_sub)?;
+            current.email = member.email;
+            self.save(&current, cancelled)?;
+            *session = current;
         }
         check_cancelled(cancelled)
     }
 
+    /// Send a JSON POST or a GET to the configured team origin. The same
+    /// serialized body is reused if Access rejects the first token.
+    pub(crate) fn send_authorized(
+        &self,
+        member_sub: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        cancelled: &AtomicBool,
+    ) -> Result<ureq::http::Response<ureq::Body>, AuthError> {
+        let url = self
+            .origin
+            .join(path)
+            .map_err(|_| AuthError::Configuration)?;
+        if !path.starts_with('/') || self.origin.origin() != url.origin() {
+            return Err(AuthError::Configuration);
+        }
+        check_cancelled(cancelled)?;
+        let mut session = self.load_member(member_sub)?;
+        if refresh_due(&session) {
+            session = self.refresh(&session, cancelled)?;
+        }
+        let agent = oauth::agent_with_timeout(
+            &url,
+            Duration::from_secs(if body.is_some() { 45 } else { 12 }),
+        );
+        let send = |session: &StoredSession| {
+            check_cancelled(cancelled)?;
+            let bearer = format!("Bearer {}", session.access_token);
+            match body {
+                Some(body) => agent
+                    .post(url.as_str())
+                    .header("Authorization", bearer)
+                    .header("Content-Type", "application/json")
+                    .send(body),
+                None => agent
+                    .get(url.as_str())
+                    .header("Authorization", bearer)
+                    .call(),
+            }
+            .map_err(|_| AuthError::Service)
+        };
+        let response = send(&session)?;
+        if !oauth::access_rejected(&response) {
+            check_cancelled(cancelled)?;
+            return Ok(response);
+        }
+        drop(response);
+        let response = send(&self.refresh(&session, cancelled)?)?;
+        check_cancelled(cancelled)?;
+        if oauth::access_rejected(&response) {
+            return Err(AuthError::Refresh);
+        }
+        Ok(response)
+    }
+
+    pub(crate) fn cursor_path(&self, member_sub: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+        let digest = Sha256::digest(format!("{}\0{member_sub}", self.origin));
+        let mut name = String::from("slippy-");
+        for byte in digest.iter() {
+            let _ = write!(name, "{byte:02x}");
+        }
+        self.store.with_extension(format!("{name}.json"))
+    }
+
+    fn load_member(&self, member_sub: &str) -> Result<StoredSession, AuthError> {
+        self.load()?
+            .filter(|session| session.member_sub == member_sub)
+            .ok_or(AuthError::Refresh)
+    }
+
+    fn refresh(
+        &self,
+        observed: &StoredSession,
+        cancelled: &AtomicBool,
+    ) -> Result<StoredSession, AuthError> {
+        let _refresh = REFRESH.lock().map_err(|_| AuthError::Storage)?;
+        check_cancelled(cancelled)?;
+        let mut current = self.load_member(&observed.member_sub)?;
+        if current.access_token == observed.access_token {
+            oauth::refresh(&self.origin, &mut current)?;
+            // Rotation already happened at the server, even if the lab was
+            // disabled while the token request was in flight.
+            session::save(&self.store, &current).map_err(|_| AuthError::Storage)?;
+        }
+        check_cancelled(cancelled)?;
+        Ok(current)
+    }
+
     pub(crate) fn sign_out(&self) -> Result<AuthState, AuthError> {
+        let _refresh = REFRESH.lock().map_err(|_| AuthError::Storage)?;
         session::clear_session(&self.store).map_err(|_| AuthError::Storage)?;
         Ok(AuthState::SignedOut)
     }
@@ -172,6 +269,35 @@ impl Client {
         check_cancelled(cancelled)?;
         session::save(&self.store, session).map_err(|_| AuthError::Storage)
     }
+}
+
+/// A signed-in client for `member_sub` at a loopback `origin`, for the
+/// Slippy tests' mock server.
+#[cfg(test)]
+pub(crate) fn test_client(store: PathBuf, origin: &str, member_sub: &str, access: &str) -> Client {
+    let client = Client::new(store, origin, Some("hex-test".into())).unwrap();
+    session::save(
+        &client.store,
+        &StoredSession {
+            origin: client.origin.to_string(),
+            client_id: "hex-test".into(),
+            token_endpoint: format!("{}cdn-cgi/access/oauth/token", client.origin),
+            access_token: access.into(),
+            refresh_token: Some("refresh-0".into()),
+            access_expires_at_ms: Some(now_ms() + 3_600_000),
+            member_sub: member_sub.into(),
+            email: "nick@dwa1.com".into(),
+            redirect_port: None,
+        },
+    )
+    .unwrap();
+    client
+}
+
+fn refresh_due(session: &StoredSession) -> bool {
+    session
+        .access_expires_at_ms
+        .is_some_and(|expires| expires <= now_ms().saturating_add(REFRESH_WINDOW_MS))
 }
 
 fn signed_in(session: StoredSession) -> AuthState {
