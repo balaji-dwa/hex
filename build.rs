@@ -177,9 +177,8 @@ fn test_build_commit() {
     println!("cargo:rerun-if-env-changed=HEX_BUILD_CHANNEL");
     println!("cargo:rerun-if-env-changed=HEX_TEST_BUILD");
     println!("cargo:rerun-if-env-changed=HEX_LOCAL_BUILD");
-    if std::env::var("HEX_TEST_BUILD").as_deref() != Ok("1")
-        && std::env::var("HEX_LOCAL_BUILD").as_deref() != Ok("1")
-    {
+    let local = std::env::var("HEX_LOCAL_BUILD").as_deref() == Ok("1");
+    if std::env::var("HEX_TEST_BUILD").as_deref() != Ok("1") && !local {
         return;
     }
     let git = |args: &[&str]| {
@@ -191,7 +190,8 @@ fn test_build_commit() {
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             .filter(|value| !value.is_empty())
     };
-    let Some(commit) = git(&["rev-parse", "--short=7", "HEAD"]) else {
+    let abbreviation = if local { "--short=12" } else { "--short=7" };
+    let Some(commit) = git(&["rev-parse", abbreviation, "HEAD"]) else {
         return;
     };
     println!("cargo:rustc-env=HEX_COMMIT={commit}");
