@@ -1,18 +1,20 @@
 //! Slippy's completion notifications through `native/slippy_notify.m`
 //! (`UNUserNotificationCenter`). An unbundled `hex` (no bundle identifier)
-//! posts nothing; the Slippy tab's unread dot still shows.
+//! posts nothing; the Slippy tab's unread dot still shows. The shim reports
+//! each request's settings and outcome through [`hex_slippy_notify_log`], so
+//! `process.log` says whether macOS took it.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString, c_char, c_int};
 
 unsafe extern "C" {
     fn hex_slippy_notifications_install();
     fn hex_slippy_notifications_authorize();
     #[cfg(not(test))]
     fn hex_slippy_notify(
-        identifier: *const std::ffi::c_char,
-        title: *const std::ffi::c_char,
-        body: *const std::ffi::c_char,
-        link: *const std::ffi::c_char,
+        identifier: *const c_char,
+        title: *const c_char,
+        body: *const c_char,
+        link: *const c_char,
     );
 }
 
@@ -24,7 +26,23 @@ pub(crate) fn install() {
     unsafe { hex_slippy_notifications_install() }
 }
 
-/// Asks once for permission to post, at the first send.
+/// The shim's diagnostics: `level` 0 is info, anything else a warning.
+#[unsafe(no_mangle)]
+extern "C" fn hex_slippy_notify_log(level: c_int, message: *const c_char) {
+    if message.is_null() {
+        return;
+    }
+    // SAFETY: the shim passes a NUL-terminated string live for this call.
+    let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    if level == 0 {
+        tracing::info!(target: "hex::slippy", "{message}");
+    } else {
+        tracing::warn!(target: "hex::slippy", "{message}");
+    }
+}
+
+/// Asks once for permission to post (alerts and sounds), when the Slippy
+/// worker starts, so the prompt never races the first answer.
 pub(super) fn authorize() {
     // SAFETY: the shim takes no arguments and runs its request once.
     unsafe { hex_slippy_notifications_authorize() }

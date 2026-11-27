@@ -1550,7 +1550,7 @@ fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         Pane::History => history::pane(ui, p, &mut layer),
         Pane::Planner => (Vec::new(), planner::pane(ui, p)),
         #[cfg(target_os = "macos")]
-        Pane::Slippy => labs::slippy::view(ui, p),
+        Pane::Slippy => labs::slippy::view(ui, p, &mut layer),
         Pane::Meetings => meetings::pane(ui, p, &mut layer),
         #[cfg(hex_capture)]
         Pane::Annotate => (Vec::new(), scrawl::pane(ui, p, &mut layer)),

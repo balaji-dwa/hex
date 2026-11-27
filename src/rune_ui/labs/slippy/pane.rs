@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use rune::{El, TextEdit, Tx, col, el, row, text};
+use rune::{Color, Cursor, El, SurfaceFit, TextEdit, Tx, Waker, col, el, row, text};
 use rune_kit::{Badge, TextArea};
 
 use super::{Progress, member, result, visible};
@@ -11,11 +12,17 @@ use crate::rune_ui::{
     controls::{self, ButtonKind, Paint},
     list_detail as ld,
 };
-use crate::slippy::{self, Detail, Error, Role, Status, Task, valid_ts};
+use crate::slippy::{self, Detail, Error, FileKey, Role, Status, Task, valid_ts};
 use crate::team_auth::AuthError;
 
 pub(super) const RESULT_TICK: Duration = Duration::from_millis(100);
 const RESULT_TIME: Duration = Duration::from_secs(3);
+/// An image attachment's square thumbnail under its message.
+pub(super) const THUMB: f32 = 64.0;
+/// The largest the preview draws an image, in points.
+const PREVIEW: (f32, f32) = (760.0, 520.0);
+/// The smallest long edge it draws one at, so a tiny image is still seen.
+const PREVIEW_MIN: f32 = 240.0;
 
 #[derive(Default)]
 pub(in crate::rune_ui) struct Data {
@@ -26,6 +33,62 @@ pub(in crate::rune_ui) struct Data {
     reply_error: Option<Error>,
     pub(super) history: Option<(u64, Progress)>,
     link: Option<String>,
+    /// Decodes fetched attachments off the window's thread.
+    images: Option<rune::ImageCache>,
+    /// Each fetched image's decode, kept while the worker holds its bytes.
+    pub(super) decoded: HashMap<FileKey, rune::Image>,
+    /// The attachment the preview shows.
+    pub(super) preview: Option<FileKey>,
+}
+
+impl Data {
+    fn reset(&mut self) {
+        self.draft.clear();
+        self.reply = None;
+        self.reply_error = None;
+        self.history = None;
+        self.decoded.clear();
+        self.preview = None;
+    }
+
+    /// Decodes newly fetched images once, drops those the worker let go,
+    /// and closes a preview whose image is gone. Whether anything changed.
+    pub(super) fn sync_images(&mut self, waker: Option<Waker>) -> bool {
+        let before = self.decoded.len();
+        let images = &self.snapshot.images;
+        self.decoded
+            .retain(|key, _| images.get(key).is_some_and(Option::is_some));
+        let mut changed = self.decoded.len() != before;
+        for (key, bytes) in images {
+            let Some(bytes) = bytes else { continue };
+            if self.decoded.contains_key(key) {
+                continue;
+            }
+            if self.images.is_none() {
+                self.images = waker.clone().map(rune::ImageCache::new);
+            }
+            let Some(cache) = &self.images else {
+                break;
+            };
+            self.decoded.insert(key.clone(), cache.load(bytes.clone()));
+            changed = true;
+        }
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|key| !self.decoded.contains_key(key))
+        {
+            self.preview = None;
+            changed = true;
+        }
+        changed
+    }
+
+    fn ready(&self, key: &FileKey) -> Option<&rune::Image> {
+        self.decoded
+            .get(key)
+            .filter(|image| image.is_ready() && image.error().is_none())
+    }
 }
 
 pub(in crate::rune_ui) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
@@ -36,10 +99,7 @@ pub(in crate::rune_ui) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
     let account = member(ui).map(str::to_owned);
     if account != ui.lab_store.slippy.account {
         ui.lab_store.slippy.account = account.clone();
-        ui.lab_store.slippy.draft.clear();
-        ui.lab_store.slippy.reply = None;
-        ui.lab_store.slippy.reply_error = None;
-        ui.lab_store.slippy.history = None;
+        ui.lab_store.slippy.reset();
         changed = true;
     }
     let pane = ui.pane == Pane::Slippy
@@ -57,15 +117,17 @@ pub(in crate::rune_ui) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
             .needs_reauth(account, AuthError::Refresh);
         slippy::sign_out();
         ui.lab_store.slippy.snapshot = Default::default();
-        ui.lab_store.slippy.draft.clear();
-        ui.lab_store.slippy.reply = None;
-        ui.lab_store.slippy.reply_error = None;
-        ui.lab_store.slippy.history = None;
+        ui.lab_store.slippy.reset();
         crate::rune_ui::leave_hidden_pane(ui);
         return true;
     }
     changed |= ui.lab_store.slippy.snapshot.version != snapshot.version;
     ui.lab_store.slippy.snapshot = snapshot;
+    let waker = ui.modes.waker.clone();
+    changed |= ui.lab_store.slippy.sync_images(waker);
+    if ui.pane != Pane::Slippy && ui.lab_store.slippy.preview.take().is_some() {
+        changed = true;
+    }
     changed |= crate::rune_ui::leave_hidden_pane(ui);
     if account.is_some()
         && slippy::active()
@@ -128,7 +190,20 @@ pub(in crate::rune_ui) fn open_link(ui: &mut Ui, ts: String, tx: &mut Tx) {
     select(ui, ts);
 }
 
-pub(in crate::rune_ui) fn view(ui: &Ui, p: Paint) -> (Vec<El>, El) {
+/// A task row's status line, its color, and its dot: a finished task once
+/// read shows neither, so only what still needs a look stands out.
+pub(super) fn row_status(p: Paint, status: Status, unread: bool) -> (&'static str, Option<Color>) {
+    let ink = match status {
+        Status::Done if !unread => return ("", None),
+        Status::Failed => p.danger(),
+        Status::Done => p.success(),
+        Status::Running | Status::Waiting => p.accent(),
+        Status::Queued => p.faint(),
+    };
+    (status.label(), Some(ink))
+}
+
+pub(in crate::rune_ui) fn view(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> (Vec<El>, El) {
     let refresh = controls::button(
         p,
         "slippy-refresh",
@@ -149,28 +224,27 @@ pub(in crate::rune_ui) fn view(ui: &Ui, p: Paint) -> (Vec<El>, El) {
                 ui.lab_store.slippy.snapshot.selection.as_deref() == Some(task.ts.as_str());
             let unread = ui.lab_store.slippy.snapshot.unread.contains(&task.ts);
             let ts = task.ts.clone();
-            let ink = match task.status {
-                Status::Failed => p.danger(),
-                Status::Done => p.success(),
-                Status::Running | Status::Waiting => p.accent(),
-                Status::Queued => p.faint(),
-            };
+            let (label, ink) = row_status(p, task.status, unread);
             ld::item_with_press(
                 p,
                 ld::Item {
                     key: format!("slippy-task-{ts}"),
                     title: task.title.clone(),
-                    meta: tr(task.status.label()).into(),
-                    meta_ink: Some(ink),
+                    meta: if label.is_empty() {
+                        String::new()
+                    } else {
+                        tr(label).into()
+                    },
+                    meta_ink: ink,
                     note: unread.then(|| tr("Unread").into()),
                     time: event_age(task.updated_at),
                     hover: Vec::new(),
                     selected,
                 },
                 |item| {
-                    let item = item.child(
-                        controls::status_dot(if unread { p.accent() } else { ink }).a11y_hidden(),
-                    );
+                    let item = item.children(ink.map(|ink| {
+                        controls::status_dot(if unread { p.accent() } else { ink }).a11y_hidden()
+                    }));
                     let ts = ts.clone();
                     crate::rune_ui::lists::select_at_once(item, selected, move |ui| {
                         select(ui, ts.clone())
@@ -207,6 +281,7 @@ pub(in crate::rune_ui) fn view(ui: &Ui, p: Paint) -> (Vec<El>, El) {
             )
         }
     };
+    layer.extend(preview(ui, p).into_iter().flatten());
     (vec![refresh], ld::body(p, "slippy", list, detail))
 }
 
@@ -219,6 +294,7 @@ fn select(ui: &mut Ui, ts: String) {
             ui.lab_store.slippy.reply = None;
             ui.lab_store.slippy.reply_error = None;
         }
+        ui.lab_store.slippy.preview = None;
         handle.select(ts);
     }
 }
@@ -243,12 +319,7 @@ fn thread(ui: &Ui, p: Paint, detail: &Detail) -> El {
                         .color(p.text())
                         .wrap(),
                 )
-                .children(
-                    message
-                        .files
-                        .iter()
-                        .map(|file| Badge::new(&file.name).build(p.k).key(&file.id)),
-                )
+                .children(attachments(ui, p, &detail.task.ts, &message.files))
         }));
     let ts = detail.task.ts.clone();
     let waiting = ui.lab_store.slippy.reply.is_some();
@@ -284,7 +355,11 @@ fn thread(ui: &Ui, p: Paint, detail: &Detail) -> El {
         .gap(12.0)
         .child(ld::card_header(
             ld::card_title(p, &detail.task.title),
-            vec![ld::meta_text(p, tr(detail.task.status.label()))],
+            // A finished thread needs no status line over its answer.
+            (detail.task.status != Status::Done)
+                .then(|| ld::meta_text(p, tr(detail.task.status.label())))
+                .into_iter()
+                .collect(),
             Vec::new(),
         ))
         .child(ld::card_scroll_sticky(
@@ -310,4 +385,124 @@ fn thread(ui: &Ui, p: Paint, detail: &Detail) -> El {
                 .key("slippy-reply-input"),
         )
         .child(row().key("slippy-reply-controls").pb(16.0).child(send))
+}
+
+/// A message's files: images as square thumbnails in a row (a placeholder
+/// while one loads), anything else, or an image that won't load, by name.
+fn attachments(ui: &Ui, p: Paint, ts: &str, files: &[slippy::AttachmentMeta]) -> Option<El> {
+    if files.is_empty() {
+        return None;
+    }
+    let data = &ui.lab_store.slippy;
+    let c = &p.k.c;
+    Some(
+        row()
+            .key("slippy-files")
+            .gap(8.0)
+            .wrap()
+            .children(files.iter().map(|file| {
+                let key = (ts.to_owned(), file.id.clone());
+                let failed = !file.mime_type.starts_with("image/")
+                    || matches!(data.snapshot.images.get(&key), Some(None))
+                    || data
+                        .decoded
+                        .get(&key)
+                        .is_some_and(|image| image.error().is_some());
+                if failed {
+                    return Badge::new(&file.name).build(p.k).key(&file.id);
+                }
+                let square = el()
+                    .key(format!("slippy-image-{}", file.id))
+                    .size(THUMB, THUMB)
+                    .radius(p.k.radius.md)
+                    .fill(c.layer_01)
+                    .clip_soft(0.0);
+                let Some(image) = data.ready(&key) else {
+                    return square.label(&file.name).a11y_hidden();
+                };
+                square
+                    .role("button")
+                    .label(&file.name)
+                    .cursor(Cursor::Pointer)
+                    .pixels_fit(image.pixels(), SurfaceFit::Fill)
+                    .on_press(move |ui: &mut Ui| ui.lab_store.slippy.preview = Some(key.clone()))
+                    .child(
+                        el().absolute(0.0, 0.0)
+                            .size(THUMB, THUMB)
+                            .radius(p.k.radius.md)
+                            .border(p.hair, c.border_weak),
+                    )
+            })),
+    )
+}
+
+/// The open attachment, fitted inside the window over a scrim: Escape, a
+/// press outside, or Close dismisses it.
+fn preview(ui: &Ui, p: Paint) -> Option<[El; 2]> {
+    let data = &ui.lab_store.slippy;
+    let key = data.preview.as_ref()?;
+    let image = data.ready(key)?;
+    let name = data
+        .snapshot
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.as_ref().ok())
+        .and_then(|detail| {
+            detail
+                .messages
+                .iter()
+                .flat_map(|message| &message.files)
+                .find(|file| file.id == key.1)
+        })
+        .map_or_else(|| key.1.clone(), |file| file.name.clone());
+    // Hex's uploads are Retina captures: two pixels to the point.
+    let [width, height] = image.size()?.map(|edge| edge.max(1) as f32 / 2.0);
+    let contain = (PREVIEW.0 / width).min(PREVIEW.1 / height);
+    let fit = contain.min((PREVIEW_MIN / width.max(height)).max(1.0));
+    let close = |ui: &mut Ui| ui.lab_store.slippy.preview = None;
+    let panel = col()
+        .key("slippy-preview")
+        .role("dialog")
+        .label(&name)
+        .min_w(320.0)
+        .padding(12.0)
+        .gap(12.0)
+        .radius(p.k.radius.xl)
+        .fill(p.k.c.bg_base)
+        .border(p.hair, p.k.c.border_weak)
+        // Presses inside the panel stay inside.
+        .on_press(|_: &mut Ui| {})
+        .child(
+            row()
+                .key("slippy-preview-header")
+                .gap(12.0)
+                .center_y()
+                .child(
+                    text(&name)
+                        .key("slippy-preview-name")
+                        .font(p.strong())
+                        .color(p.text())
+                        .grow(1.0)
+                        .shrink()
+                        .truncate(),
+                )
+                .child(controls::button(
+                    p,
+                    "slippy-preview-close",
+                    tr("Close"),
+                    ButtonKind::Secondary,
+                    move |ui, _| close(ui),
+                )),
+        )
+        .child(
+            el().key("slippy-preview-image")
+                .self_center()
+                .size(width * fit, height * fit)
+                .radius(p.k.radius.md)
+                .clip_soft(0.0)
+                .pixels_fit(image.pixels(), SurfaceFit::Fit)
+                .label(&name)
+                .a11y_hidden(),
+        );
+    Some(controls::modal_sheet(p, "slippy-preview", panel, close))
 }

@@ -7,8 +7,8 @@ mod sync;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use client::{Detail, Error, Origin, Role, Status, Task, valid_ts};
-pub(crate) use sync::{Snapshot, active, handle, reconcile, sign_out, snapshot};
+pub(crate) use client::{AttachmentMeta, Detail, Error, Origin, Role, Status, Task, valid_ts};
+pub(crate) use sync::{FileKey, Snapshot, active, handle, reconcile, sign_out, snapshot};
 
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;

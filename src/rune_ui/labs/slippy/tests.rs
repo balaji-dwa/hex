@@ -146,3 +146,211 @@ fn empty_list() -> crate::rune_ui::capture_capsule::flow::List {
         queued: false,
     }
 }
+
+const READ: &str = "991795815730.000001";
+const FRESH: &str = "991795815730.000002";
+
+fn task(ts: &str, status: &str) -> crate::slippy::Task {
+    serde_json::from_value(serde_json::json!({
+        "ts": ts,
+        "origin": "annotate",
+        "title": format!("Task {ts}"),
+        "status": status,
+        "seq": 1,
+        "createdAt": 1_700_000_000_000_u64,
+        "updatedAt": 1_700_000_000_000_u64,
+    }))
+    .unwrap()
+}
+
+fn thumbnail_png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let (width, height) = (320, 200);
+    let mut encoder = png::Encoder::new(&mut bytes, width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let pixels: Vec<u8> = (0..width * height)
+        .flat_map(|index| {
+            let (x, y) = (index % width, index / width);
+            [(x * 255 / width) as u8, (y * 255 / height) as u8, 160]
+        })
+        .collect();
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&pixels)
+        .unwrap();
+    bytes
+}
+
+/// The Slippy pane over a read and an unread finished task, the read one
+/// open with an image and a text attachment, its image decoded.
+fn slippy_runtime() -> rune::Runtime<Ui> {
+    let mut ui = ui(true, signed_in("nick@dwa1.com"));
+    ui.pane = Pane::Slippy;
+    let data = &mut ui.lab_store.slippy;
+    data.snapshot.tasks = vec![task(READ, "done"), task(FRESH, "done")];
+    data.snapshot.unread.insert(FRESH.into());
+    data.snapshot.selection = Some(READ.into());
+    data.snapshot.detail = Some(Ok(serde_json::from_value(serde_json::json!({
+        "task": task_json(READ),
+        "messages": [{
+            "ts": READ,
+            "role": "user",
+            "text": "Fix this",
+            "files": [
+                {"id": "F1", "name": "annotation.png", "mimeType": "image/png"},
+                {"id": "F2", "name": "notes.txt", "mimeType": "text/plain"},
+            ],
+        }],
+    }))
+    .unwrap()));
+    data.snapshot.images.insert(
+        (READ.into(), "F1".into()),
+        Some(std::sync::Arc::from(thumbnail_png())),
+    );
+    assert!(data.sync_images(Some(std::sync::Arc::new(|| {}))));
+    data.decoded[&(READ.to_owned(), "F1".to_owned())]
+        .wait()
+        .unwrap();
+    let env = rune::Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let text =
+        rune::text::TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
+    let mut rt =
+        crate::rune_ui::offscreen::runtime(ui, crate::rune_ui::view, (980.0, 760.0), env, text);
+    rt.on_key = Some(crate::rune_ui::on_key);
+    settle(&mut rt);
+    rt
+}
+
+fn task_json(ts: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ts": ts, "origin": "annotate", "title": format!("Task {ts}"), "status": "done",
+        "seq": 1, "createdAt": 1_700_000_000_000_u64, "updatedAt": 1_700_000_000_000_u64,
+    })
+}
+
+fn settle(rt: &mut rune::Runtime<Ui>) {
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+}
+
+fn tap(rt: &mut rune::Runtime<Ui>, key: &str) {
+    let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}"));
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
+fn under(rt: &rune::Runtime<Ui>, root: &str) -> Vec<rune::ElementInfo> {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting && e.path.contains(root) && !e.path.contains("/faces/size"))
+        .collect()
+}
+
+fn shown(rt: &rune::Runtime<Ui>, key: &str) -> bool {
+    rt.elements()
+        .iter()
+        .any(|e| !e.exiting && e.key.as_deref() == Some(key))
+}
+
+#[test]
+fn a_read_finished_task_shows_no_status_and_an_unread_one_does() {
+    let p = paint();
+    for status in [
+        crate::slippy::Status::Queued,
+        crate::slippy::Status::Running,
+        crate::slippy::Status::Waiting,
+        crate::slippy::Status::Failed,
+    ] {
+        for unread in [false, true] {
+            let (label, ink) = super::pane::row_status(p, status, unread);
+            assert_eq!(label, status.label());
+            assert!(ink.is_some());
+        }
+    }
+    let done = crate::slippy::Status::Done;
+    assert_eq!(super::pane::row_status(p, done, false), ("", None));
+    assert_eq!(
+        super::pane::row_status(p, done, true),
+        ("Done", Some(p.success()))
+    );
+
+    let rt = slippy_runtime();
+    let read = under(&rt, &format!("slippy-task-{READ}"));
+    let fresh = under(&rt, &format!("slippy-task-{FRESH}"));
+    let texts = |elements: &[rune::ElementInfo]| -> Vec<String> {
+        elements.iter().filter_map(|e| e.text.clone()).collect()
+    };
+    let dot = |elements: &[rune::ElementInfo]| elements.iter().any(|e| e.path.ends_with("/dot"));
+    assert!(
+        !texts(&read).iter().any(|text| text == "Done"),
+        "{:?}",
+        texts(&read)
+    );
+    assert!(!dot(&read));
+    assert!(
+        texts(&fresh).iter().any(|text| text == "Done"),
+        "{:?}",
+        texts(&fresh)
+    );
+    assert!(texts(&fresh).iter().any(|text| text == "Unread"));
+    assert!(dot(&fresh));
+    // The open, finished thread's header carries only its title.
+    assert!(
+        !texts(&under(&rt, "detail-header"))
+            .iter()
+            .any(|text| text == "Done")
+    );
+}
+
+#[test]
+fn an_image_attachment_is_a_thumbnail_that_opens_a_preview() {
+    let mut rt = slippy_runtime();
+    let key = (READ.to_owned(), "F1".to_owned());
+    assert!(shown(&rt, "slippy-image-F1"));
+    // Not an image: its name.
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some("notes.txt"))
+    );
+    assert!(!shown(&rt, "slippy-preview"));
+
+    tap(&mut rt, "slippy-image-F1");
+    assert_eq!(rt.state.lab_store.slippy.preview.as_ref(), Some(&key));
+    assert!(shown(&rt, "slippy-preview"));
+    assert!(shown(&rt, "slippy-preview-image"));
+    rt.key(rune::KeyEvent {
+        key: rune::Key::Escape,
+        mods: rune::Mods::default(),
+    });
+    settle(&mut rt);
+    assert_eq!(rt.state.lab_store.slippy.preview, None, "Escape closes it");
+    assert!(!shown(&rt, "slippy-preview"));
+
+    tap(&mut rt, "slippy-image-F1");
+    tap(&mut rt, "slippy-preview-close");
+    assert_eq!(rt.state.lab_store.slippy.preview, None, "Close closes it");
+
+    tap(&mut rt, "slippy-image-F1");
+    rt.pointer_down(4.0, 4.0);
+    rt.pointer_up(4.0, 4.0);
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.lab_store.slippy.preview, None,
+        "a press outside closes it"
+    );
+
+    // The worker let the image go (sign-out, another account): no preview.
+    tap(&mut rt, "slippy-image-F1");
+    rt.state.lab_store.slippy.snapshot.images.clear();
+    assert!(rt.state.lab_store.slippy.sync_images(None));
+    assert_eq!(rt.state.lab_store.slippy.preview, None);
+    assert!(rt.state.lab_store.slippy.decoded.is_empty());
+}

@@ -131,17 +131,42 @@ fn read(stream: &mut TcpStream) -> Option<Request> {
     })
 }
 
+/// Writes `body` as JSON, or, under a `Content-Type` header, an array of
+/// byte values as those raw bytes.
 fn respond(stream: &mut TcpStream, status: u16, headers: &[(&str, String)], body: &Value) {
-    let data = body.to_string();
+    let raw = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"));
+    let (content_type, data) = match (raw, body) {
+        (Some((_, kind)), Value::Array(bytes)) => (
+            kind.as_str(),
+            bytes
+                .iter()
+                .map(|byte| byte.as_u64().unwrap() as u8)
+                .collect(),
+        ),
+        _ => ("application/json", body.to_string().into_bytes()),
+    };
     let _ = write!(
         stream,
-        "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: private, no-store\r\n",
+        "HTTP/1.1 {status} Mock\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: private, no-store\r\n",
         data.len()
     );
     for (name, value) in headers {
-        let _ = write!(stream, "{name}: {value}\r\n");
+        if !name.eq_ignore_ascii_case("content-type") {
+            let _ = write!(stream, "{name}: {value}\r\n");
+        }
     }
-    let _ = write!(stream, "\r\n{data}");
+    let _ = write!(stream, "\r\n");
+    let _ = stream.write_all(&data);
+}
+
+fn raw(content_type: &str, bytes: &[u8]) -> Reply {
+    (
+        200,
+        vec![("Content-Type", content_type.into())],
+        Value::Array(bytes.iter().map(|byte| json!(byte)).collect()),
+    )
 }
 
 fn task(ts: &str, status: &str, seq: u64) -> Value {
@@ -634,4 +659,274 @@ fn an_annotation_bundle_sends_its_contact_sheet_and_words() {
     assert_eq!(super::bundle::read(&bundle).unwrap().0, "Annotation");
     std::fs::remove_file(bundle.join("sheet.png")).unwrap();
     assert_eq!(super::bundle::read(&bundle).err(), Some(Error::Image));
+}
+
+/// A server whose tasks the test edits, each detail answering with the
+/// task's own messages.
+#[derive(Default)]
+struct Threads {
+    tasks: Vec<Value>,
+    messages: HashMap<String, Vec<Value>>,
+    /// Details answer with this task state instead, as a lagging read.
+    stale: Option<Value>,
+    files: HashMap<String, (&'static str, Vec<u8>)>,
+}
+
+fn threads_server(threads: Arc<Mutex<Threads>>) -> Mock {
+    Mock::start(move |request| {
+        let threads = threads.lock().unwrap();
+        let path = request.path.trim_start_matches("/api/hex/tasks");
+        match (
+            request.method.as_str(),
+            path.split('/').collect::<Vec<_>>().as_slice(),
+        ) {
+            ("GET", [""]) => ok(History {
+                tasks: threads.tasks.clone(),
+            }
+            .list(request.query["since"].parse().unwrap())),
+            ("GET", ["", ts]) => {
+                let task = threads.tasks.iter().find(|task| task["ts"] == *ts).unwrap();
+                ok(json!({
+                    "task": threads.stale.as_ref().unwrap_or(task),
+                    "messages": threads.messages.get(*ts).cloned().unwrap_or_default(),
+                }))
+            }
+            ("GET", ["", _, "files", id]) => match threads.files.get(*id) {
+                Some((kind, bytes)) => raw(kind, bytes),
+                None => (404, Vec::new(), json!({"error": "Not found"})),
+            },
+            _ => (404, Vec::new(), json!({"error": "Not found"})),
+        }
+    })
+}
+
+fn titled(ts: &str, status: &str, seq: u64, title: &str) -> Value {
+    let mut task = task(ts, status, seq);
+    task["title"] = json!(title);
+    task
+}
+
+fn answer(ts: &str, text: &str) -> Value {
+    json!({"ts": ts, "role": "assistant", "text": text, "files": []})
+}
+
+#[test]
+fn a_new_title_alone_never_notifies_again_but_a_new_answer_does() {
+    let dir = TempDir::new();
+    let (done, waiting) = ("991795815724.000001", "991795815724.000002");
+    let threads = Arc::new(Mutex::new(Threads {
+        tasks: vec![task(done, "running", 1), task(waiting, "running", 2)],
+        ..Threads::default()
+    }));
+    let server = threads_server(threads.clone());
+    let worker = Worker::start(server.client(&dir.0), MEMBER, false, Arc::new(|| {})).unwrap();
+    wait_until("the first load", || {
+        worker.handle.snapshot().tasks.len() == 2
+    });
+
+    // Both finish: each notifies once.
+    {
+        let mut threads = threads.lock().unwrap();
+        threads.tasks = vec![task(done, "done", 3), task(waiting, "waiting", 4)];
+        threads
+            .messages
+            .insert(done.into(), vec![answer("991795815724.000010", "Sent it.")]);
+        threads.messages.insert(
+            waiting.into(),
+            vec![answer("991795815724.000011", "Which account?")],
+        );
+    }
+    worker.handle.refresh();
+    wait_until("both notifications", || {
+        posted(done).len() == 1 && posted(waiting).len() == 1
+    });
+
+    // The server names the finished thread: a new seq, same status and answer.
+    threads.lock().unwrap().tasks[0] = titled(done, "done", 5, "Renewal email sent");
+    worker.handle.refresh();
+    wait_until("the new title", || {
+        worker
+            .handle
+            .snapshot()
+            .tasks
+            .iter()
+            .any(|task| task.title == "Renewal email sent")
+    });
+    assert_eq!(posted(done).len(), 1, "a title change notified");
+
+    // Still waiting, but Slippy asked something new: that notifies.
+    {
+        let mut threads = threads.lock().unwrap();
+        threads.tasks[1] = task(waiting, "waiting", 6);
+        threads
+            .messages
+            .get_mut(waiting)
+            .unwrap()
+            .push(answer("991795815724.000012", "And which quarter?"));
+    }
+    worker.handle.refresh();
+    wait_until("the second question", || posted(waiting).len() == 2);
+    assert_eq!(
+        posted(waiting)[1],
+        (
+            format!("hex.slippy.{waiting}.6"),
+            "And which quarter?".into()
+        )
+    );
+    assert_eq!(posted(done).len(), 1);
+    worker.stop_and_join();
+}
+
+#[test]
+fn a_detail_behind_the_list_holds_the_notification_until_it_catches_up() {
+    let dir = TempDir::new();
+    let ts = "991795815725.000001";
+    let threads = Arc::new(Mutex::new(Threads {
+        tasks: vec![task(ts, "running", 1)],
+        ..Threads::default()
+    }));
+    let server = threads_server(threads.clone());
+    let auth = server.client(&dir.0);
+    let cursor = auth.cursor_path(MEMBER);
+    let worker = Worker::start(auth, MEMBER, false, Arc::new(|| {})).unwrap();
+    wait_until("the first load", || {
+        worker.handle.snapshot().tasks.len() == 1
+    });
+    {
+        let mut threads = threads.lock().unwrap();
+        threads.tasks[0] = task(ts, "done", 2);
+        threads.stale = Some(task(ts, "running", 1));
+        threads
+            .messages
+            .insert(ts.into(), vec![answer("991795815725.000010", "Done.")]);
+    }
+    worker.handle.refresh();
+    let details = || {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path.ends_with(ts))
+            .count()
+    };
+    wait_until("the stale detail", || details() >= 1);
+    worker.handle.refresh();
+    wait_until("another stale detail", || details() >= 2);
+    assert!(posted(ts).is_empty());
+    assert_eq!(std::fs::read_to_string(&cursor).unwrap(), "1");
+    assert_eq!(worker.handle.snapshot().tasks[0].status, Status::Running);
+
+    threads.lock().unwrap().stale = None;
+    worker.handle.refresh();
+    wait_until("the notification", || posted(ts).len() == 1);
+    wait_until("the cursor", || {
+        std::fs::read_to_string(&cursor).is_ok_and(|seq| seq == "2")
+    });
+    worker.stop_and_join();
+}
+
+fn image_threads(ts: &str, png: Vec<u8>) -> Threads {
+    let file = |id: &str, name: &str, kind: &str| json!({"id": id, "name": name, "mimeType": kind});
+    Threads {
+        tasks: vec![task(ts, "done", 1)],
+        messages: HashMap::from([(
+            ts.to_owned(),
+            vec![json!({
+                "ts": ts,
+                "role": "user",
+                "text": "Fix this",
+                "files": [
+                    file("F1", "annotation.png", "image/png"),
+                    file("F2", "notes.txt", "text/plain"),
+                    file("F3", "gone.png", "image/png"),
+                ],
+            })],
+        )]),
+        files: HashMap::from([
+            ("F1".to_owned(), ("image/png", png)),
+            ("F2".to_owned(), ("text/plain", b"notes".to_vec())),
+        ]),
+        ..Threads::default()
+    }
+}
+
+#[test]
+fn the_file_endpoint_returns_an_attachments_bytes() {
+    let dir = TempDir::new();
+    let image = png(4, 4, |x, y| [x as u8 * 60, y as u8 * 60, 0]);
+    let server = threads_server(Arc::new(Mutex::new(image_threads(TS, image.clone()))));
+    let auth = server.client(&dir.0);
+    let cancel = AtomicBool::new(false);
+    let client = Client {
+        auth: &auth,
+        member: MEMBER,
+        cancel: &cancel,
+    };
+    assert_eq!(
+        client.file(TS, "F1").unwrap(),
+        ("image/png".to_owned(), image)
+    );
+    assert_eq!(client.file(TS, "F3").err(), Some(Error::Rejected(404)));
+    // Never sent: neither names one file of one task.
+    assert_eq!(client.file(TS, "../F1").err(), Some(Error::Rejected(404)));
+    assert_eq!(client.file("../x", "F1").err(), Some(Error::Rejected(404)));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, format!("/api/hex/tasks/{TS}/files/F1"));
+    assert_eq!(requests[0].headers["authorization"], "Bearer access-0");
+}
+
+#[test]
+fn the_selected_threads_images_are_fetched_once_and_dropped_at_sign_out() {
+    let dir = TempDir::new();
+    let ts = "991795815726.000001";
+    let image = png(4, 4, |x, _| [x as u8 * 60, 0, 0]);
+    let server = threads_server(Arc::new(Mutex::new(image_threads(ts, image.clone()))));
+    let auth = Mutex::new(Some(server.client(&dir.0)));
+    let take = || auth.lock().unwrap().take().ok_or(AuthError::Storage);
+    sync::reconcile_with(Some(MEMBER), true, || {}, take);
+    wait_until("the first load", || super::snapshot().tasks.len() == 1);
+    super::handle().unwrap().select(ts.into());
+    let key = |id: &str| (ts.to_owned(), id.to_owned());
+    wait_until("the images", || {
+        let images = super::snapshot().images;
+        images.contains_key(&key("F1")) && images.contains_key(&key("F3"))
+    });
+    let images = super::snapshot().images;
+    assert_eq!(images[&key("F1")].as_deref(), Some(image.as_slice()));
+    // Not found: the file's name shows instead, and it isn't asked again.
+    assert_eq!(images[&key("F3")], None);
+    // Not an image: never fetched.
+    assert!(!images.contains_key(&key("F2")));
+    super::handle().unwrap().refresh();
+    super::handle().unwrap().refresh();
+    let version = super::snapshot().version;
+    wait_until("another detail", || super::snapshot().version > version);
+    let fetched = |id: &str| {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path.ends_with(&format!("/files/{id}")))
+            .count()
+    };
+    assert_eq!((fetched("F1"), fetched("F2"), fetched("F3")), (1, 0, 1));
+
+    super::sign_out();
+    assert!(super::snapshot().images.is_empty());
+    sync::reconcile_with(None, false, || {}, || Err(AuthError::Storage));
+    wait_until("the worker to stop", || !sync::stopping());
+}
+
+#[test]
+fn the_image_cache_keeps_the_newest_attachments() {
+    let mut cache = sync::ImageCache::default();
+    for index in 0..sync::MAX_IMAGES + 3 {
+        cache.insert(
+            (TS.into(), format!("F{index}")),
+            Some(Arc::from(&b"png"[..])),
+        );
+    }
+    let entries = &cache.entries;
+    assert_eq!(entries.len(), sync::MAX_IMAGES);
+    assert!(!entries.contains_key(&(TS.into(), "F2".into())));
+    assert!(entries.contains_key(&(TS.into(), "F3".into())));
 }

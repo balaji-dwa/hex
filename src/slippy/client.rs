@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::team_auth::{AuthError, Client as AuthClient};
 
 const TASKS: &str = "/api/hex/tasks";
+const JSON_BYTES: u64 = 16 * 1024 * 1024;
+pub(super) const FILE_BYTES: u64 = 12 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -197,25 +199,51 @@ impl Client<'_> {
         self.post(&format!("{}/messages", task_path(ts)?), &body)
     }
 
+    /// An attachment's bytes and their `Content-Type`, at most
+    /// [`FILE_BYTES`].
+    pub(super) fn file(&self, ts: &str, file_id: &str) -> Result<(String, Vec<u8>), Error> {
+        if !valid_file_id(file_id) {
+            return Err(Error::Rejected(404));
+        }
+        let path = format!("{}/files/{file_id}", task_path(ts)?);
+        self.fetch(&path, None, FILE_BYTES)
+    }
+
     fn post<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T, Error> {
         let body = serde_json::to_vec(body).map_err(|_| Error::Response)?;
         self.request(path, Some(&body))
     }
 
     fn request<T: DeserializeOwned>(&self, path: &str, body: Option<&[u8]>) -> Result<T, Error> {
+        let (_, bytes) = self.fetch(path, body, JSON_BYTES)?;
+        serde_json::from_slice(&bytes).map_err(|_| Error::Response)
+    }
+
+    fn fetch(
+        &self,
+        path: &str,
+        body: Option<&[u8]>,
+        limit: u64,
+    ) -> Result<(String, Vec<u8>), Error> {
         let mut response = self
             .auth
             .send_authorized(self.member, path, body, self.cancel)?;
         if !response.status().is_success() {
             return Err(Error::Rejected(response.status().as_u16()));
         }
+        let mime = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
         let bytes = response
             .body_mut()
             .with_config()
-            .limit(16 * 1024 * 1024)
+            .limit(limit)
             .read_to_vec()
             .map_err(|_| Error::Response)?;
-        serde_json::from_slice(&bytes).map_err(|_| Error::Response)
+        Ok((mime, bytes))
     }
 }
 
@@ -228,6 +256,13 @@ pub(crate) fn valid_ts(ts: &str) -> bool {
                 .chain(micros.bytes())
                 .all(|byte| byte.is_ascii_digit())
     })
+}
+
+fn valid_file_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn task_path(ts: &str) -> Result<String, Error> {
