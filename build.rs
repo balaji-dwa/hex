@@ -102,6 +102,12 @@ fn main() {
     compile_swift_bridge("calendar", "HEXCalendarBridge", &[], None);
     println!("cargo:rustc-link-lib=framework=EventKit");
     compile_permission_guide();
+    println!("cargo:rerun-if-changed=native/slippy_notify.m");
+    println!("cargo:rustc-link-lib=framework=UserNotifications");
+    cc::Build::new()
+        .file("native/slippy_notify.m")
+        .flag("-fobjc-arc")
+        .compile("hex_slippy_notify");
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     for runtime in ["swift-5.5/macosx", "swift/macosx"] {
         let swift_runtime = format!(

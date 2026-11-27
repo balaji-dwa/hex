@@ -80,6 +80,8 @@ mod screenshots;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod shortcut_pause;
 #[cfg(target_os = "macos")]
+mod slippy;
+#[cfg(target_os = "macos")]
 mod suppression;
 #[cfg(any(target_os = "macos", test))]
 mod team_auth;
