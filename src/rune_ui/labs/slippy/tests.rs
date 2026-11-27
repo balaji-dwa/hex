@@ -263,7 +263,7 @@ fn shown(rt: &rune::Runtime<Ui>, key: &str) -> bool {
 }
 
 #[test]
-fn a_read_finished_task_shows_no_status_and_an_unread_one_does() {
+fn finished_tasks_drop_done_and_unread_text_and_center_row_content() {
     let p = paint();
     for status in [
         crate::slippy::Status::Queued,
@@ -281,29 +281,76 @@ fn a_read_finished_task_shows_no_status_and_an_unread_one_does() {
     assert_eq!(super::pane::row_status(p, done, false), ("", None));
     assert_eq!(
         super::pane::row_status(p, done, true),
-        ("Done", Some(p.success()))
+        ("", Some(p.accent()))
     );
 
     let rt = slippy_runtime();
-    let read = under(&rt, &format!("slippy-task-{READ}"));
-    let fresh = under(&rt, &format!("slippy-task-{FRESH}"));
+    let read_key = format!("slippy-task-{READ}");
+    let fresh_key = format!("slippy-task-{FRESH}");
+    let read = under(&rt, &read_key);
+    let fresh = under(&rt, &fresh_key);
     let texts = |elements: &[rune::ElementInfo]| -> Vec<String> {
         elements.iter().filter_map(|e| e.text.clone()).collect()
     };
-    let dot = |elements: &[rune::ElementInfo]| elements.iter().any(|e| e.path.ends_with("/dot"));
+    fn find_suffix<'a>(elements: &'a [rune::ElementInfo], suffix: &str) -> &'a rune::ElementInfo {
+        elements
+            .iter()
+            .find(|e| e.path.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no element ending with {suffix}"))
+    }
+    let center_y = |e: &rune::ElementInfo| e.target[1] + e.target[3] / 2.0;
+
+    // Read finished row: no status text, no dot, title & time centered in the row.
     assert!(
-        !texts(&read).iter().any(|text| text == "Done"),
+        !texts(&read)
+            .iter()
+            .any(|text| text == "Done" || text == "Unread"),
         "{:?}",
         texts(&read)
     );
-    assert!(!dot(&read));
+    assert!(!read.iter().any(|e| e.path.ends_with("/dot")));
+    let read_box = find_suffix(&read, &read_key);
+    let read_title = find_suffix(&read, "/title");
+    let read_time = find_suffix(&read, "/time");
     assert!(
-        texts(&fresh).iter().any(|text| text == "Done"),
+        (center_y(read_title) - center_y(read_box)).abs() <= 1.0,
+        "read title not centered: title={} box={}",
+        center_y(read_title),
+        center_y(read_box)
+    );
+    assert!(
+        (center_y(read_time) - center_y(read_box)).abs() <= 1.0,
+        "read time not centered: time={} box={}",
+        center_y(read_time),
+        center_y(read_box)
+    );
+
+    // Unread finished row: neither "Done" nor "Unread" text, only the dot,
+    // and title, time, and dot all centered in the row box.
+    assert!(
+        !texts(&fresh)
+            .iter()
+            .any(|text| text == "Done" || text == "Unread"),
         "{:?}",
         texts(&fresh)
     );
-    assert!(texts(&fresh).iter().any(|text| text == "Unread"));
-    assert!(dot(&fresh));
+    let fresh_box = find_suffix(&fresh, &fresh_key);
+    let fresh_title = find_suffix(&fresh, "/title");
+    let fresh_time = find_suffix(&fresh, "/time");
+    let fresh_dot = find_suffix(&fresh, "/dot");
+    for (name, el) in [
+        ("title", fresh_title),
+        ("time", fresh_time),
+        ("dot", fresh_dot),
+    ] {
+        assert!(
+            (center_y(el) - center_y(fresh_box)).abs() <= 1.0,
+            "fresh {name} not centered: {name}={} box={}",
+            center_y(el),
+            center_y(fresh_box)
+        );
+    }
+
     // The open, finished thread's header carries only its title.
     assert!(
         !texts(&under(&rt, "detail-header"))

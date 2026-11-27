@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use rune::{Color, Cursor, El, SurfaceFit, TextEdit, Tx, Waker, col, el, row, text};
+use rune::{Align, Color, Cursor, El, SurfaceFit, TextEdit, Tx, Waker, col, el, row, text};
 use rune_kit::{Badge, TextArea};
 
 use super::{Progress, member, result, visible};
 use crate::desktop::i18n::{event_age, tr};
 use crate::rune_ui::{
     Destination, Pane, Ui,
-    controls::{self, ButtonKind, Paint},
-    list_detail as ld,
+    controls::{self, ButtonKind, METRICS, Paint},
+    list_detail as ld, lists,
 };
 use crate::slippy::{self, Detail, Error, FileKey, Role, Status, Task, valid_ts};
 use crate::team_auth::AuthError;
@@ -246,17 +246,92 @@ pub(in crate::rune_ui) fn open_link(ui: &mut Ui, ts: String, tx: &mut Tx) {
     select(ui, ts);
 }
 
-/// A task row's status line, its color, and its dot: a finished task once
-/// read shows neither, so only what still needs a look stands out.
+/// A task row's status line and dot: finished tasks drop both "Done" and
+/// "Unread" text, leaving only the unread dot when a finished task still
+/// needs a look.
 pub(super) fn row_status(p: Paint, status: Status, unread: bool) -> (&'static str, Option<Color>) {
     let ink = match status {
-        Status::Done if !unread => return ("", None),
+        Status::Done => return ("", unread.then(|| p.accent())),
         Status::Failed => p.danger(),
-        Status::Done => p.success(),
         Status::Running | Status::Waiting => p.accent(),
         Status::Queued => p.faint(),
     };
     (status.label(), Some(ink))
+}
+
+fn task_row(p: Paint, task: &Task, selected: bool, unread: bool) -> El {
+    let c = &p.k.c;
+    let ts = task.ts.clone();
+    let (label, ink) = row_status(p, task.status, unread);
+    let dot_ink = ink.map(|ink| if unread { p.accent() } else { ink });
+    let time = event_age(task.updated_at);
+    let described = [
+        (!label.is_empty()).then(|| tr(label)),
+        unread.then(|| tr("Unread")),
+        Some(time.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let words = col()
+        .key("words")
+        .gap(2.0)
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .child(
+            text(task.title.clone())
+                .key("title")
+                .font(p.k.ty.ui_medium)
+                .color(p.text())
+                .truncate()
+                .a11y_hidden(),
+        )
+        .children((!label.is_empty()).then(|| {
+            text(tr(label))
+                .key("meta")
+                .font(p.k.ty.small)
+                .color(ink.unwrap_or(p.muted()))
+                .truncate()
+                .a11y_hidden()
+        }));
+    let end = row()
+        .key("end")
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(time)
+                .key("time")
+                .font(p.tabular(p.meta()))
+                .color(p.faint())
+                .align(Align::End)
+                .a11y_hidden(),
+        )
+        .children(dot_ink.map(controls::status_dot));
+    let mut row_el = row()
+        .key(format!("slippy-task-{ts}"))
+        .role("listitem")
+        .label(task.title.clone())
+        .description(described)
+        .min_h(METRICS.item_h)
+        .px(METRICS.row_px)
+        .py(8.0)
+        .gap(12.0)
+        .center_y()
+        .radius(p.k.radius.md)
+        .hover(c.hover)
+        .hover_group()
+        .child(words)
+        .child(end);
+    if selected {
+        row_el = row_el.fill(c.layer_02);
+    }
+    lists::source_item(
+        lists::select_at_once(row_el, selected, move |ui| select(ui, ts.clone())),
+        selected,
+    )
 }
 
 pub(in crate::rune_ui) fn view(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> (Vec<El>, El) {
@@ -279,34 +354,7 @@ pub(in crate::rune_ui) fn view(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> (Vec<E
             let selected =
                 ui.lab_store.slippy.snapshot.selection.as_deref() == Some(task.ts.as_str());
             let unread = ui.lab_store.slippy.snapshot.unread.contains(&task.ts);
-            let ts = task.ts.clone();
-            let (label, ink) = row_status(p, task.status, unread);
-            ld::item_with_press(
-                p,
-                ld::Item {
-                    key: format!("slippy-task-{ts}"),
-                    title: task.title.clone(),
-                    meta: if label.is_empty() {
-                        String::new()
-                    } else {
-                        tr(label).into()
-                    },
-                    meta_ink: ink,
-                    note: unread.then(|| tr("Unread").into()),
-                    time: event_age(task.updated_at),
-                    hover: Vec::new(),
-                    selected,
-                },
-                |item| {
-                    let item = item.children(ink.map(|ink| {
-                        controls::status_dot(if unread { p.accent() } else { ink }).a11y_hidden()
-                    }));
-                    let ts = ts.clone();
-                    crate::rune_ui::lists::select_at_once(item, selected, move |ui| {
-                        select(ui, ts.clone())
-                    })
-                },
-            )
+            task_row(p, task, selected, unread)
         }));
     let list = ld::list_column(p, el().key("slippy-list-top"), "slippy-task-scroll", list);
     let detail = match &ui.lab_store.slippy.snapshot.detail {
