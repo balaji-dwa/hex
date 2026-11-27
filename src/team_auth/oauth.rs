@@ -12,6 +12,7 @@ const WHOAMI: &str = "/api/hex/whoami";
 
 #[derive(Deserialize)]
 struct ResourceMetadata {
+    resource: Option<String>,
     #[serde(default)]
     authorization_servers: Vec<String>,
 }
@@ -66,7 +67,7 @@ pub(super) fn sign_in(
     open: impl FnOnce(&Url) -> io::Result<()>,
     save: impl FnOnce(&StoredSession) -> Result<(), AuthError>,
 ) -> Result<StoredSession, AuthError> {
-    let metadata = discover(origin, cancelled)?;
+    let (metadata, resource) = discover(origin, cancelled)?;
     let allow_http = is_loopback(origin);
     let mut authorize = endpoint(&metadata.authorization_endpoint, allow_http)?;
     let token_endpoint = endpoint(&metadata.token_endpoint, allow_http)?;
@@ -95,7 +96,7 @@ pub(super) fn sign_in(
         ("state", &pkce.state),
         ("code_challenge", &pkce.challenge()),
         ("code_challenge_method", "S256"),
-        ("scope", "openid email profile offline_access"),
+        ("resource", resource.as_str()),
     ]);
     check_cancelled(cancelled)?;
     open(&authorize).map_err(|_| AuthError::Browser)?;
@@ -110,6 +111,7 @@ pub(super) fn sign_in(
                 ("code_verifier", &pkce.verifier),
                 ("redirect_uri", &redirect_uri),
                 ("client_id", &client_id),
+                ("resource", resource.as_str()),
             ],
             AuthError::Denied,
         )?;
@@ -133,7 +135,7 @@ pub(super) fn sign_in(
     result
 }
 
-fn discover(origin: &Url, cancelled: &AtomicBool) -> Result<ServerMetadata, AuthError> {
+fn discover(origin: &Url, cancelled: &AtomicBool) -> Result<(ServerMetadata, Url), AuthError> {
     let allow_http = is_loopback(origin);
     check_cancelled(cancelled)?;
     let whoami = join(origin, WHOAMI)?;
@@ -153,18 +155,24 @@ fn discover(origin: &Url, cancelled: &AtomicBool) -> Result<ServerMetadata, Auth
         .transpose()?
         .unwrap_or(join(origin, "/.well-known/oauth-protected-resource")?);
     check_cancelled(cancelled)?;
-    let resource: Option<ResourceMetadata> =
+    let metadata: Option<ResourceMetadata> =
         match agent(&metadata_url).get(metadata_url.as_str()).call() {
             Ok(response) if response.status().is_success() => {
                 Some(decode(response, AuthError::Service)?)
             }
             _ => None,
         };
-    let mut issuer =
-        match resource.and_then(|resource| resource.authorization_servers.into_iter().next()) {
-            Some(issuer) => endpoint(&issuer, allow_http)?,
-            None => origin.clone(),
-        };
+    let resource = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.resource.as_deref())
+        .map(|resource| endpoint(resource, allow_http))
+        .transpose()?
+        .unwrap_or_else(|| origin.clone());
+    let mut issuer = metadata
+        .and_then(|metadata| metadata.authorization_servers.into_iter().next())
+        .map(|issuer| endpoint(&issuer, allow_http))
+        .transpose()?
+        .unwrap_or_else(|| origin.clone());
     if issuer.query().is_some() {
         return Err(AuthError::Configuration);
     }
@@ -178,7 +186,7 @@ fn discover(origin: &Url, cancelled: &AtomicBool) -> Result<ServerMetadata, Auth
         .get(issuer.as_str())
         .call()
         .map_err(|_| AuthError::Service)?;
-    decode(response, AuthError::Service)
+    Ok((decode(response, AuthError::Service)?, resource))
 }
 
 fn resource_metadata(challenge: &str) -> Option<&str> {

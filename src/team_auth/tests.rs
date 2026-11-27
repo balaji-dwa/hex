@@ -366,6 +366,14 @@ impl Drop for Mock {
 }
 
 impl MockState {
+    fn resource(&self) -> String {
+        if self.challenge {
+            format!("{}/api/hex/whoami", self.origin)
+        } else {
+            self.origin.clone()
+        }
+    }
+
     fn request(&mut self, stream: &mut TcpStream) {
         let mut reader = BufReader::new(&mut *stream);
         let mut line = String::new();
@@ -393,7 +401,7 @@ impl MockState {
             ("GET", "/api/hex/whoami") => {
                 let Some(token) = headers.get("authorization") else {
                     let challenge = format!(
-                        "Bearer realm=\"Hex\", resource_metadata=\"{}/access/resource\"",
+                        "Bearer realm=\"OAuth\", error=\"invalid_token\", error_description=\"Missing or invalid access token\", resource_metadata=\"{}/.well-known/cloudflare-access-protected-resource/api/hex/whoami\"",
                         self.origin
                     );
                     let headers: &[_] = if self.challenge {
@@ -430,30 +438,54 @@ impl MockState {
                     &json!({"principal": "member", "sub": "member-id", "email": "nick@dwa1.com"}),
                 );
             }
-            ("GET", path @ ("/access/resource" | "/.well-known/oauth-protected-resource")) => {
-                assert_eq!(path == "/access/resource", self.challenge);
+            (
+                "GET",
+                path @ ("/.well-known/cloudflare-access-protected-resource/api/hex/whoami"
+                | "/.well-known/oauth-protected-resource"),
+            ) => {
+                assert_eq!(
+                    path != "/.well-known/oauth-protected-resource",
+                    self.challenge
+                );
                 self.resource_discoveries += 1;
+                let issuer = if self.challenge {
+                    self.origin.clone()
+                } else {
+                    format!("{}/issuer", self.origin)
+                };
                 respond(
                     stream,
                     "200 OK",
                     &[],
-                    &json!({"authorization_servers": [format!("{}/issuer", self.origin)]}),
+                    &json!({"resource": self.resource(), "authorization_servers": [issuer]}),
                 );
             }
-            ("GET", "/.well-known/oauth-authorization-server/issuer") => {
+            (
+                "GET",
+                path @ ("/.well-known/oauth-authorization-server"
+                | "/.well-known/oauth-authorization-server/issuer"),
+            ) => {
+                assert_eq!(
+                    path == "/.well-known/oauth-authorization-server",
+                    self.challenge
+                );
                 assert_eq!(self.resource_discoveries, 1);
                 respond(
                     stream,
                     "200 OK",
                     &[],
                     &json!({
-                        "authorization_endpoint": format!("{}/authorize", self.origin),
-                        "token_endpoint": format!("{}/token", self.origin),
-                        "registration_endpoint": format!("{}/register", self.origin),
+                        "authorization_endpoint": format!("{}/cdn-cgi/access/oauth/authorization", self.origin),
+                        "token_endpoint": format!("{}/cdn-cgi/access/oauth/token", self.origin),
+                        "registration_endpoint": format!("{}/cdn-cgi/access/oauth/registration", self.origin),
+                        "grant_types_supported": ["authorization_code", "refresh_token"],
+                        "code_challenge_methods_supported": ["S256"],
+                        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
+                        "response_types_supported": ["code"],
                     }),
                 );
             }
-            ("POST", "/register") => {
+            ("POST", "/cdn-cgi/access/oauth/registration") => {
                 self.registrations += 1;
                 assert_eq!(headers["content-type"], "application/json");
                 let reg: serde_json::Value = serde_json::from_slice(&data).unwrap();
@@ -470,13 +502,14 @@ impl MockState {
                     stream,
                     "201 Created",
                     &[],
-                    &json!({"client_id": "registered-hex"}),
+                    &json!({"client_id": "registered-hex", "redirect_uris": [self.redirect]}),
                 );
             }
-            ("GET", "/authorize") => {
+            ("GET", "/cdn-cgi/access/oauth/authorization") => {
                 let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
                 assert_eq!(query["response_type"], "code");
-                assert_eq!(query["scope"], "openid email profile offline_access");
+                assert_eq!(Url::parse(&query["resource"]), Url::parse(&self.resource()));
+                assert!(!query.contains_key("scope"));
                 assert_eq!(query["code_challenge_method"], "S256");
                 assert_eq!(Some(&query["client_id"]), self.registered_id.as_ref());
                 let mut callback = Url::parse(&query["redirect_uri"]).unwrap();
@@ -503,13 +536,14 @@ impl MockState {
                     &json!({}),
                 );
             }
-            ("POST", "/token") => {
+            ("POST", "/cdn-cgi/access/oauth/token") => {
                 assert_eq!(headers["content-type"], "application/x-www-form-urlencoded");
                 let form: HashMap<_, _> = url::form_urlencoded::parse(&data).into_owned().collect();
                 assert_eq!(Some(&form["client_id"]), self.registered_id.as_ref());
                 if form["grant_type"] == "authorization_code" {
                     self.code_exchanges += 1;
                     assert_eq!(form["code"], "test-code");
+                    assert_eq!(Url::parse(&form["resource"]), Url::parse(&self.resource()));
                     assert_eq!(Some(&form["redirect_uri"]), self.redirect.as_ref());
                     let digest = Sha256::digest(form["code_verifier"].as_bytes());
                     assert_eq!(Some(loopback::base64url(&digest)), self.pkce_challenge);

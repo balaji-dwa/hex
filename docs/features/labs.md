@@ -3637,7 +3637,9 @@ distribution and whether Annotate's send reaches it. The
 
 Team sign-in (`team-auth`, macOS Dev builds) is off by default.
 Settings › Labs › Meetings opens Google sign-in in the default browser.
-Hex checks the callback and verifies the signed-in member with
+Hex discovers the OAuth resource from Cloudflare Access's challenge and
+sends it with the authorization and code exchange requests. Hex checks
+the callback and verifies the signed-in member with
 `/api/hex/whoami`. While the lab is on, visiting Labs checks the saved
 session and refreshes it if it is about to expire or the server rejects
 the access token. Sign out removes the local session. Hex keeps credentials
@@ -3650,8 +3652,10 @@ keeps the saved session for next time.
 Checks: [team_auth/tests.rs](../../src/team_auth/tests.rs) exercises the
 OAuth flow, refresh, cancellation, and sign-out against loopback servers.
 `team_auth_card_shows_the_controls_for_each_state_while_enabled` in
-[panes.rs](../../src/rune_ui/tests/panes.rs) exercises the card. A real
-Google sign-in through the team's Cloudflare Access tenant remains unverified.
+[panes.rs](../../src/rune_ui/tests/panes.rs) exercises the card. The team's
+live Cloudflare Access tenant served discovery, accepted loopback client
+registration, and redirected the resource-bearing request to Access login.
+A real Google sign-in through that tenant remains unverified.
 
 Only on speakers (`speakers-only`, every OS)
 puts "While dictating" behind the default output. While on, each dictation
