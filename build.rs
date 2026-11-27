@@ -103,9 +103,14 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=EventKit");
     compile_permission_guide();
     println!("cargo:rerun-if-changed=native/slippy_notify.m");
+    println!("cargo:rerun-if-changed=native/slippy_image.m");
     println!("cargo:rustc-link-lib=framework=UserNotifications");
+    // Slippy's JPEG uploads and thumbnails go through ImageIO.
+    println!("cargo:rustc-link-lib=framework=ImageIO");
+    println!("cargo:rustc-link-lib=framework=CoreGraphics");
     cc::Build::new()
         .file("native/slippy_notify.m")
+        .file("native/slippy_image.m")
         .flag("-fobjc-arc")
         .compile("hex_slippy_notify");
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");

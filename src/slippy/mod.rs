@@ -1,4 +1,5 @@
 mod bundle;
+mod cache;
 mod client;
 mod image;
 pub(crate) mod notify;

@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use super::cache::DiskCache;
 use super::client::{Attachment, Client, Error, Origin, Status, base64, valid_ts};
+use super::image::Kind;
 use super::sync::{self, Worker};
 use crate::team_auth::{AuthError, Client as AuthClient, test_client};
 
@@ -261,6 +263,7 @@ fn the_four_endpoints_match_the_wire_contract() {
         name: "screenshot.png",
         mime_type: "image/png",
         base64: base64(b"png"),
+        raw: b"png".to_vec(),
     }];
 
     let created = client
@@ -618,10 +621,12 @@ fn a_noisy_image_is_shrunk_until_it_fits_the_upload() {
     assert!(scaled.len() <= 4 * 1024 * 1024);
     let (width, height) = size_of(&scaled);
     assert!(width < 2560 && height < 1600);
-    // Base64 of the upload stays under the server's 8 MiB decoded limit.
-    let attachment = super::image::attachment("screenshot.png", &source).unwrap();
-    assert!(attachment.base64.len() / 4 * 3 < 8 * 1024 * 1024);
-    assert_eq!(attachment.mime_type, "image/png");
+    // ImageIO's JPEG of it stays well under the 4 MiB upload.
+    let attachment = super::image::attachment(Kind::Screenshot, &source).unwrap();
+    assert!(attachment.raw.len() <= 4 * 1024 * 1024);
+    assert_eq!(attachment.mime_type, "image/jpeg");
+    assert_eq!(attachment.name, "screenshot.jpg");
+    assert!(jpeg_size(&attachment.raw).0 <= 2048);
 }
 
 #[test]
@@ -653,8 +658,9 @@ fn an_annotation_bundle_sends_its_contact_sheet_and_words() {
     scrawl_capture::bundle::publish(&bundle, &manifest("Fix this button")).unwrap();
     let (text, attachment) = super::bundle::read(&bundle).unwrap();
     assert_eq!(text, "Fix this button");
-    assert_eq!(attachment.name, "annotation.png");
-    assert_eq!(attachment.mime_type, "image/png");
+    assert_eq!(attachment.name, "annotation.jpg");
+    assert_eq!(attachment.mime_type, "image/jpeg");
+    assert_eq!(jpeg_size(&attachment.raw), (2048, 683));
     scrawl_capture::bundle::publish(&bundle, &manifest("  ")).unwrap();
     assert_eq!(super::bundle::read(&bundle).unwrap().0, "Annotation");
     std::fs::remove_file(bundle.join("sheet.png")).unwrap();
@@ -670,11 +676,13 @@ struct Threads {
     /// Details answer with this task state instead, as a lagging read.
     stale: Option<Value>,
     files: HashMap<String, (&'static str, Vec<u8>)>,
+    /// The `ts` a create answers with.
+    created: Option<String>,
 }
 
 fn threads_server(threads: Arc<Mutex<Threads>>) -> Mock {
     Mock::start(move |request| {
-        let threads = threads.lock().unwrap();
+        let mut threads = threads.lock().unwrap();
         let path = request.path.trim_start_matches("/api/hex/tasks");
         match (
             request.method.as_str(),
@@ -690,6 +698,32 @@ fn threads_server(threads: Arc<Mutex<Threads>>) -> Mock {
                     "task": threads.stale.as_ref().unwrap_or(task),
                     "messages": threads.messages.get(*ts).cloned().unwrap_or_default(),
                 }))
+            }
+            // A new task under `created`: its message names each upload `U<n>`.
+            ("POST", [""]) => {
+                let ts = threads.created.clone().unwrap();
+                let body = request.json();
+                let files: Vec<Value> = body["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, file)| {
+                        json!({"id": format!("U{}", index + 1), "name": file["name"], "mimeType": file["mimeType"]})
+                    })
+                    .collect();
+                let seq = threads.tasks.len() as u64 + 1;
+                let created = task(&ts, "queued", seq);
+                threads.tasks.push(created.clone());
+                threads.messages.insert(
+                    ts.clone(),
+                    vec![json!({"ts": ts, "role": "user", "text": body["text"], "files": files})],
+                );
+                (
+                    202,
+                    Vec::new(),
+                    json!({"task": created, "deduplicated": false}),
+                )
             }
             ("GET", ["", _, "files", id]) => match threads.files.get(*id) {
                 Some((kind, bytes)) => raw(kind, bytes),
@@ -881,18 +915,28 @@ fn the_selected_threads_images_are_fetched_once_and_dropped_at_sign_out() {
     let ts = "991795815726.000001";
     let image = png(4, 4, |x, _| [x as u8 * 60, 0, 0]);
     let server = threads_server(Arc::new(Mutex::new(image_threads(ts, image.clone()))));
-    let auth = Mutex::new(Some(server.client(&dir.0)));
+    let auth = server.client(&dir.0);
+    let cache_dir = auth.cache_dir(MEMBER);
+    let auth = Mutex::new(Some(auth));
     let take = || auth.lock().unwrap().take().ok_or(AuthError::Storage);
     sync::reconcile_with(Some(MEMBER), true, || {}, take);
     wait_until("the first load", || super::snapshot().tasks.len() == 1);
     super::handle().unwrap().select(ts.into());
     let key = |id: &str| (ts.to_owned(), id.to_owned());
     wait_until("the images", || {
-        let images = super::snapshot().images;
+        let images = super::snapshot().thumbs;
         images.contains_key(&key("F1")) && images.contains_key(&key("F3"))
     });
-    let images = super::snapshot().images;
-    assert_eq!(images[&key("F1")].as_deref(), Some(image.as_slice()));
+    let images = super::snapshot().thumbs;
+    // Its thumbnail: a small JPEG, the full image kept on disk.
+    let thumb = images[&key("F1")].clone().unwrap();
+    assert_eq!(&thumb[..2], [0xFF, 0xD8]);
+    // The preview reads the full image from disk, not the server.
+    super::handle().unwrap().open_preview(key("F1"));
+    let opened = super::snapshot().preview_image.unwrap();
+    assert_eq!((opened.0, &opened.1[..]), (key("F1"), image.as_slice()));
+    super::handle().unwrap().close_preview();
+    assert!(super::snapshot().preview_image.is_none());
     // Not found: the file's name shows instead, and it isn't asked again.
     assert_eq!(images[&key("F3")], None);
     // Not an image: never fetched.
@@ -911,9 +955,11 @@ fn the_selected_threads_images_are_fetched_once_and_dropped_at_sign_out() {
     assert_eq!((fetched("F1"), fetched("F2"), fetched("F3")), (1, 0, 1));
 
     super::sign_out();
-    assert!(super::snapshot().images.is_empty());
+    assert!(super::snapshot().thumbs.is_empty());
     sync::reconcile_with(None, false, || {}, || Err(AuthError::Storage));
     wait_until("the worker to stop", || !sync::stopping());
+    // Signed out: this member's images are gone from disk too.
+    assert!(!cache_dir.exists());
 }
 
 #[test]
@@ -929,4 +975,335 @@ fn the_image_cache_keeps_the_newest_attachments() {
     assert_eq!(entries.len(), sync::MAX_IMAGES);
     assert!(!entries.contains_key(&(TS.into(), "F2".into())));
     assert!(entries.contains_key(&(TS.into(), "F3".into())));
+}
+
+/// A JPEG's pixel size, from its frame header.
+fn jpeg_size(bytes: &[u8]) -> (u32, u32) {
+    assert_eq!(&bytes[..2], [0xFF, 0xD8], "not a JPEG");
+    let mut at = 2;
+    while at + 9 < bytes.len() {
+        assert_eq!(bytes[at], 0xFF);
+        let marker = bytes[at + 1];
+        let len = usize::from(u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]));
+        if (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker) {
+            let height = u16::from_be_bytes([bytes[at + 5], bytes[at + 6]]);
+            let width = u16::from_be_bytes([bytes[at + 7], bytes[at + 8]]);
+            return (width.into(), height.into());
+        }
+        at += 2 + len;
+    }
+    panic!("no JPEG frame");
+}
+
+/// A Retina screenshot's look: a flat sidebar, lines of dark "text" on a
+/// light page, and a photo-like panel of soft noise.
+fn screenshot(width: u32, height: u32) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_u32;
+    let mut noise = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        (state & 0x07) as u8
+    };
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let grain = noise();
+            pixels.push(if x < width / 5 {
+                [236, 236, 240]
+            } else if x > width * 3 / 5 && y > height / 4 && y < height * 3 / 4 {
+                [
+                    (x * 160 / width) as u8 + grain,
+                    (y * 160 / height) as u8 + grain,
+                    120 + grain,
+                ]
+            } else if y % 32 < 10 && (x / 9) % 7 < 5 && (x + y) % 3 != 0 {
+                [40, 40, 48]
+            } else {
+                [252, 252, 252]
+            });
+        }
+    }
+    png(width, height, |x, y| pixels[(y * width + x) as usize])
+}
+
+#[test]
+fn uploads_are_jpegs_at_most_2048_pixels_and_smaller_than_the_png() {
+    let source = screenshot(3024, 1964);
+    let attachment = super::image::attachment(Kind::Screenshot, &source).unwrap();
+    let jpeg = &attachment.raw;
+    eprintln!(
+        "3024x1964 screenshot: PNG {} bytes -> JPEG {} bytes ({:.1}x smaller)",
+        source.len(),
+        jpeg.len(),
+        source.len() as f64 / jpeg.len() as f64
+    );
+    assert_eq!(attachment.mime_type, "image/jpeg");
+    assert_eq!(attachment.name, "screenshot.jpg");
+    assert_eq!(attachment.base64, base64(jpeg));
+    assert_eq!(jpeg_size(jpeg), (2048, 1330));
+    // Real contact sheets shrink about 3x; this one's noise is JPEG's worst.
+    assert!(jpeg.len() < source.len());
+    // A small one keeps its size.
+    let small = super::image::attachment(Kind::Annotation, &screenshot(800, 500)).unwrap();
+    assert_eq!(jpeg_size(&small.raw), (800, 500));
+    assert_eq!(small.name, "annotation.jpg");
+    // A transparent capture (a window's shadow) still encodes.
+    let mut rgba = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut rgba, 64, 32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let pixels: Vec<u8> = (0..64 * 32)
+            .flat_map(|i| [10, 20, 30, (i % 256) as u8])
+            .collect();
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&pixels)
+            .unwrap();
+    }
+    assert_eq!(
+        jpeg_size(
+            &super::image::attachment(Kind::Screenshot, &rgba)
+                .unwrap()
+                .raw
+        ),
+        (64, 32)
+    );
+    // Not an image: no upload.
+    assert_eq!(
+        super::image::attachment(Kind::Screenshot, b"nope").err(),
+        Some(Error::Image)
+    );
+
+    let thumb = super::image::thumbnail(jpeg).unwrap();
+    eprintln!("its thumbnail: {} bytes", thumb.len());
+    // Its short edge fills the 64-point square at 2x.
+    assert_eq!(jpeg_size(&thumb), (198, 128));
+    assert!(thumb.len() < 16 * 1024);
+    assert_eq!(super::image::size(jpeg), Some((2048, 1330)));
+    // A panorama's long edge stops at 512; a tiny image keeps its size.
+    let wide = super::image::thumbnail(&screenshot(4000, 400)).unwrap();
+    assert_eq!(jpeg_size(&wide), (512, 51));
+    let tiny = super::image::thumbnail(&png(40, 30, |_, _| [9, 9, 9])).unwrap();
+    assert_eq!(jpeg_size(&tiny), (40, 30));
+}
+
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[test]
+fn the_disk_cache_is_private_and_lets_the_least_recently_used_go() {
+    assert_eq!(super::cache::CAP, 50 * 1024 * 1024);
+    let dir = TempDir::new();
+    let folder = dir.0.join("slippy.cache");
+    let full = super::image::attachment(Kind::Screenshot, &screenshot(1200, 800))
+        .unwrap()
+        .raw;
+    let cache = DiskCache::new(folder.clone());
+    assert!(cache.full(TS, "F1").is_none());
+    let thumb = cache.store(TS, "F1", &full);
+    assert_eq!(jpeg_size(&thumb), (192, 128));
+    let file = |id: &str, kind: &str| folder.join(format!("{}-{id}.{kind}", TS.replace('.', "_")));
+    assert_eq!(mode(&folder), 0o700);
+    assert_eq!(mode(&file("F1", "img")), 0o600);
+    assert_eq!(mode(&file("F1", "thumb")), 0o600);
+    assert_eq!(cache.full(TS, "F1").as_deref(), Some(full.as_slice()));
+    assert_eq!(cache.thumb(TS, "F1"), Some(thumb.clone()));
+    // A lost thumbnail is made again from the full image.
+    std::fs::remove_file(file("F1", "thumb")).unwrap();
+    assert_eq!(jpeg_size(&cache.thumb(TS, "F1").unwrap()), (192, 128));
+    assert!(file("F1", "thumb").exists());
+    // Nothing outside the folder's names is read or written.
+    assert!(cache.full("../x", "F1").is_none());
+    assert!(cache.full(TS, "../F1").is_none());
+    cache.store(TS, "../F9", &full);
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+    // An upload waits for its id.
+    cache.stage(TS, 0, &full);
+    assert!(cache.thumb(TS, "U1").is_none());
+    assert!(cache.claim(TS, 0, "U1"));
+    assert!(!cache.claim(TS, 0, "U1"));
+    assert_eq!(cache.full(TS, "U1").as_deref(), Some(full.as_slice()));
+    std::fs::remove_dir_all(&folder).unwrap();
+
+    // Room for three and a half: the fourth lets the least recently used go.
+    let pair = (full.len() + thumb.len()) as u64;
+    let cache = DiskCache::with_cap(folder.clone(), pair * 7 / 2);
+    for id in ["F1", "F2", "F3"] {
+        cache.store(TS, id, &full);
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(cache.thumb(TS, "F1").is_some(), "F1 used again");
+    thread::sleep(Duration::from_millis(20));
+    cache.store(TS, "F4", &full);
+    let kept = |id: &str| file(id, "img").exists() && file(id, "thumb").exists();
+    assert!(!file("F2", "img").exists() && !file("F2", "thumb").exists());
+    assert!(kept("F1") && kept("F3") && kept("F4"));
+    cache.clear();
+    assert!(!folder.exists());
+}
+
+/// Waits for every command sent before it to finish.
+fn barrier(handle: &sync::Handle) {
+    let _ = handle.submit(|| Err(Error::Text)).unwrap().recv();
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
+}
+
+#[test]
+fn an_upload_seeds_the_cache_so_its_thread_never_downloads_it() {
+    let dir = TempDir::new();
+    let ts = "991795815727.000001";
+    let threads = Arc::new(Mutex::new(Threads {
+        created: Some(ts.into()),
+        ..Threads::default()
+    }));
+    let server = threads_server(threads.clone());
+    let auth = server.client(&dir.0);
+    let folder = auth.cache_dir(MEMBER);
+    let worker = Worker::start(auth, MEMBER, true, Arc::new(|| {})).unwrap();
+    let sent = worker
+        .handle
+        .image(
+            Origin::Screenshot,
+            screenshot(3024, 1964),
+            "Fix this".into(),
+        )
+        .unwrap()
+        .recv()
+        .unwrap()
+        .unwrap();
+    assert_eq!(sent.ts, ts);
+    let posted = server
+        .requests()
+        .into_iter()
+        .find(|request| request.method == "POST")
+        .unwrap()
+        .json();
+    assert_eq!(posted["files"][0]["mimeType"], "image/jpeg");
+    assert_eq!(posted["files"][0]["name"], "screenshot.jpg");
+
+    let key = (ts.to_owned(), "U1".to_owned());
+    worker.handle.select(ts.into());
+    wait_until("the thumbnail", || {
+        worker
+            .handle
+            .snapshot()
+            .thumbs
+            .get(&key)
+            .is_some_and(Option::is_some)
+    });
+    let thumb = worker.handle.snapshot().thumbs[&key].clone().unwrap();
+    assert_eq!(jpeg_size(&thumb), (198, 128));
+    worker.handle.open_preview(key.clone());
+    let (open, full) = worker.handle.snapshot().preview_image.unwrap();
+    assert_eq!((open, jpeg_size(&full)), (key.clone(), (2048, 1330)));
+    worker.handle.close_preview();
+    assert!(worker.handle.snapshot().preview_image.is_none());
+    let downloads = || {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path.contains("/files/"))
+            .count()
+    };
+    barrier(&worker.handle);
+    assert_eq!(downloads(), 0);
+
+    // Hex quits (the folder stays) and starts again: still nothing to download.
+    let kept = dir.0.join("kept");
+    copy_dir(&folder, &kept);
+    worker.stop_and_join();
+    assert!(!folder.exists(), "stopping (sign-out) deletes the folder");
+    copy_dir(&kept, &folder);
+    let worker = Worker::start(server.client(&dir.0), MEMBER, true, Arc::new(|| {})).unwrap();
+    wait_until("the reload", || worker.handle.snapshot().tasks.len() == 1);
+    worker.handle.select(ts.into());
+    wait_until("the thumbnail from disk", || {
+        worker
+            .handle
+            .snapshot()
+            .thumbs
+            .get(&key)
+            .is_some_and(Option::is_some)
+    });
+    assert_eq!(worker.handle.snapshot().thumbs[&key], Some(thumb));
+    worker.handle.open_preview(key.clone());
+    assert!(worker.handle.snapshot().preview_image.is_some());
+    barrier(&worker.handle);
+    assert_eq!(downloads(), 0);
+    worker.stop_and_join();
+    assert!(!folder.exists());
+}
+
+#[test]
+fn a_thread_selected_again_shows_at_once_and_asks_again_only_once_it_moved() {
+    let dir = TempDir::new();
+    let (a, b) = ("991795815728.000001", "991795815728.000002");
+    let threads = Arc::new(Mutex::new(Threads {
+        tasks: vec![task(a, "done", 1), task(b, "done", 2)],
+        messages: HashMap::from([
+            (
+                a.to_owned(),
+                vec![answer("991795815728.000010", "A's answer")],
+            ),
+            (
+                b.to_owned(),
+                vec![answer("991795815728.000011", "B's answer")],
+            ),
+        ]),
+        ..Threads::default()
+    }));
+    let server = threads_server(threads.clone());
+    let worker = Worker::start(server.client(&dir.0), MEMBER, true, Arc::new(|| {})).unwrap();
+    wait_until("the first load", || {
+        worker.handle.snapshot().tasks.len() == 2
+    });
+    let asked = |ts: &str| {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path == format!("/api/hex/tasks/{ts}"))
+            .count()
+    };
+    let shown = || match worker.handle.snapshot().detail {
+        Some(Ok(detail)) => Some((detail.task.ts, detail.task.seq)),
+        _ => None,
+    };
+    worker.handle.select(a.into());
+    barrier(&worker.handle);
+    worker.handle.select(b.into());
+    barrier(&worker.handle);
+    assert_eq!((asked(a), asked(b)), (1, 1));
+    assert_eq!(shown(), Some((b.to_owned(), 2)));
+
+    // Back to A: its thread at once, no "Loading…", and no request.
+    worker.handle.select(a.into());
+    assert_eq!(shown(), Some((a.to_owned(), 1)));
+    barrier(&worker.handle);
+    worker.handle.poll_now();
+    barrier(&worker.handle);
+    assert_eq!(asked(a), 1);
+
+    // A moves on: the next poll asks again.
+    threads.lock().unwrap().tasks[0] = task(a, "running", 3);
+    worker.handle.poll_now();
+    barrier(&worker.handle);
+    assert_eq!(asked(a), 2);
+    assert_eq!(shown(), Some((a.to_owned(), 3)));
+    // Refresh always asks.
+    worker.handle.refresh();
+    barrier(&worker.handle);
+    assert_eq!(asked(a), 3);
+    worker.stop_and_join();
 }

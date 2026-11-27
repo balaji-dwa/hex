@@ -164,8 +164,11 @@ fn task(ts: &str, status: &str) -> crate::slippy::Task {
 }
 
 fn thumbnail_png() -> Vec<u8> {
+    image_png(320, 200)
+}
+
+fn image_png(width: u32, height: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
-    let (width, height) = (320, 200);
     let mut encoder = png::Encoder::new(&mut bytes, width, height);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
@@ -205,7 +208,7 @@ fn slippy_runtime() -> rune::Runtime<Ui> {
         }],
     }))
     .unwrap()));
-    data.snapshot.images.insert(
+    data.snapshot.thumbs.insert(
         (READ.into(), "F1".into()),
         Some(std::sync::Arc::from(thumbnail_png())),
     );
@@ -349,8 +352,53 @@ fn an_image_attachment_is_a_thumbnail_that_opens_a_preview() {
 
     // The worker let the image go (sign-out, another account): no preview.
     tap(&mut rt, "slippy-image-F1");
-    rt.state.lab_store.slippy.snapshot.images.clear();
+    rt.state.lab_store.slippy.snapshot.thumbs.clear();
     assert!(rt.state.lab_store.slippy.sync_images(None));
     assert_eq!(rt.state.lab_store.slippy.preview, None);
     assert!(rt.state.lab_store.slippy.decoded.is_empty());
+}
+
+fn size_of(rt: &rune::Runtime<Ui>, key: &str) -> (f32, f32) {
+    let element = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("no element {key}"));
+    (element.target[2], element.target[3])
+}
+
+#[test]
+fn the_preview_decodes_the_full_image_only_while_open() {
+    let mut rt = slippy_runtime();
+    let key = (READ.to_owned(), "F1".to_owned());
+    // The thread decodes only the thumbnail.
+    assert!(rt.state.lab_store.slippy.full.is_none());
+
+    tap(&mut rt, "slippy-image-F1");
+    assert_eq!(rt.state.lab_store.slippy.preview.as_ref(), Some(&key));
+    // Until the full image arrives, the thumbnail fills the preview.
+    assert!(shown(&rt, "slippy-preview-image"));
+    assert!(rt.state.lab_store.slippy.full.is_none());
+
+    // The worker loaded it: decoded once, drawn at its own size.
+    let data = &mut rt.state.lab_store.slippy;
+    data.snapshot.preview_image = Some((key.clone(), std::sync::Arc::from(image_png(800, 500))));
+    assert!(data.sync_images(Some(std::sync::Arc::new(|| {}))));
+    data.full.as_ref().unwrap().1.wait().unwrap();
+    assert!(!data.sync_images(None), "decoded once");
+    rt.invalidate();
+    settle(&mut rt);
+    assert_eq!(size_of(&rt, "slippy-preview-image"), (400.0, 250.0));
+
+    // Closed: the full-size decode goes with it.
+    rt.key(rune::KeyEvent {
+        key: rune::Key::Escape,
+        mods: rune::Mods::default(),
+    });
+    settle(&mut rt);
+    assert_eq!(rt.state.lab_store.slippy.preview, None);
+    assert!(rt.state.lab_store.slippy.full.is_none());
+    // A full image for a preview no longer open is never decoded.
+    assert!(!rt.state.lab_store.slippy.sync_images(None));
+    assert!(rt.state.lab_store.slippy.full.is_none());
 }

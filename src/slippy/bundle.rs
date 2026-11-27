@@ -25,7 +25,7 @@ pub(super) fn read(path: &Path) -> Result<(String, Attachment), Error> {
             if bytes.len() as u64 > max {
                 return None;
             }
-            super::image::attachment("annotation.png", &bytes).ok()
+            super::image::attachment(super::image::Kind::Annotation, &bytes).ok()
         })
         .ok_or(Error::Image)?;
     Ok((text, image))

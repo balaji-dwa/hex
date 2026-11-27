@@ -228,6 +228,18 @@ impl Client {
     }
 
     pub(crate) fn cursor_path(&self, member_sub: &str) -> PathBuf {
+        self.store
+            .with_extension(format!("{}.json", self.slippy_name(member_sub)))
+    }
+
+    /// The owner-only folder Slippy keeps `member_sub`'s attachments in,
+    /// beside [`cursor_path`](Self::cursor_path).
+    pub(crate) fn cache_dir(&self, member_sub: &str) -> PathBuf {
+        self.store
+            .with_extension(format!("{}.cache", self.slippy_name(member_sub)))
+    }
+
+    fn slippy_name(&self, member_sub: &str) -> String {
         use sha2::{Digest, Sha256};
         use std::fmt::Write;
         let digest = Sha256::digest(format!("{}\0{member_sub}", self.origin));

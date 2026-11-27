@@ -83,6 +83,9 @@ pub(crate) struct Attachment {
     pub name: &'static str,
     pub mime_type: &'static str,
     pub base64: String,
+    /// The bytes `base64` encodes, kept to seed this Mac's cache.
+    #[serde(skip)]
+    pub raw: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -258,7 +261,7 @@ pub(crate) fn valid_ts(ts: &str) -> bool {
     })
 }
 
-fn valid_file_id(id: &str) -> bool {
+pub(super) fn valid_file_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
         && id
             .bytes()

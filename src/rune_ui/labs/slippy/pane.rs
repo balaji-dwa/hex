@@ -35,10 +35,12 @@ pub(in crate::rune_ui) struct Data {
     link: Option<String>,
     /// Decodes fetched attachments off the window's thread.
     images: Option<rune::ImageCache>,
-    /// Each fetched image's decode, kept while the worker holds its bytes.
+    /// Each thumbnail's decode, kept while the worker holds its bytes.
     pub(super) decoded: HashMap<FileKey, rune::Image>,
     /// The attachment the preview shows.
     pub(super) preview: Option<FileKey>,
+    /// The preview's full-size decode, only while it is open.
+    pub(super) full: Option<(FileKey, rune::Image)>,
 }
 
 impl Data {
@@ -49,17 +51,20 @@ impl Data {
         self.history = None;
         self.decoded.clear();
         self.preview = None;
+        self.full = None;
     }
 
-    /// Decodes newly fetched images once, drops those the worker let go,
-    /// and closes a preview whose image is gone. Whether anything changed.
+    /// Decodes newly fetched thumbnails once, drops those the worker let
+    /// go, closes a preview whose thumbnail is gone, and decodes the open
+    /// preview's full-size image once the worker has it (dropping it once
+    /// closed). Whether anything changed.
     pub(super) fn sync_images(&mut self, waker: Option<Waker>) -> bool {
         let before = self.decoded.len();
-        let images = &self.snapshot.images;
+        let thumbs = &self.snapshot.thumbs;
         self.decoded
-            .retain(|key, _| images.get(key).is_some_and(Option::is_some));
+            .retain(|key, _| thumbs.get(key).is_some_and(Option::is_some));
         let mut changed = self.decoded.len() != before;
-        for (key, bytes) in images {
+        for (key, bytes) in thumbs {
             let Some(bytes) = bytes else { continue };
             if self.decoded.contains_key(key) {
                 continue;
@@ -81,6 +86,26 @@ impl Data {
             self.preview = None;
             changed = true;
         }
+        let wanted = self.preview.as_ref().and_then(|key| {
+            self.snapshot
+                .preview_image
+                .as_ref()
+                .filter(|(loaded, _)| loaded == key)
+        });
+        match wanted {
+            Some((key, bytes)) => {
+                if self.full.as_ref().is_none_or(|(shown, _)| shown != key) {
+                    if self.images.is_none() {
+                        self.images = waker.map(rune::ImageCache::new);
+                    }
+                    if let Some(cache) = &self.images {
+                        self.full = Some((key.clone(), cache.load(bytes.clone())));
+                        changed = true;
+                    }
+                }
+            }
+            None => changed |= self.full.take().is_some(),
+        }
         changed
     }
 
@@ -88,6 +113,32 @@ impl Data {
         self.decoded
             .get(key)
             .filter(|image| image.is_ready() && image.error().is_none())
+    }
+
+    /// The preview's full-size decode of `key`, once ready.
+    fn full_ready(&self, key: &FileKey) -> Option<&rune::Image> {
+        self.full
+            .as_ref()
+            .filter(|(shown, image)| shown == key && image.is_ready() && image.error().is_none())
+            .map(|(_, image)| image)
+    }
+}
+
+/// Opens attachment `key`'s preview: its thumbnail scaled up until the
+/// full-size image the worker loads is decoded.
+fn open_preview(ui: &mut Ui, key: FileKey) {
+    ui.lab_store.slippy.preview = Some(key.clone());
+    if let Ok(handle) = slippy::handle() {
+        handle.open_preview(key);
+    }
+}
+
+/// Closes the preview and lets its full-size image go.
+fn close_preview(ui: &mut Ui) {
+    ui.lab_store.slippy.preview = None;
+    ui.lab_store.slippy.full = None;
+    if let Ok(handle) = slippy::handle() {
+        handle.close_preview();
     }
 }
 
@@ -125,7 +176,12 @@ pub(in crate::rune_ui) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
     ui.lab_store.slippy.snapshot = snapshot;
     let waker = ui.modes.waker.clone();
     changed |= ui.lab_store.slippy.sync_images(waker);
-    if ui.pane != Pane::Slippy && ui.lab_store.slippy.preview.take().is_some() {
+    if ui.lab_store.slippy.preview.is_none() && ui.lab_store.slippy.snapshot.preview_image.is_some()
+    {
+        close_preview(ui);
+    }
+    if ui.lab_store.slippy.preview.is_some() && ui.pane != Pane::Slippy {
+        close_preview(ui);
         changed = true;
     }
     changed |= crate::rune_ui::leave_hidden_pane(ui);
@@ -294,7 +350,7 @@ fn select(ui: &mut Ui, ts: String) {
             ui.lab_store.slippy.reply = None;
             ui.lab_store.slippy.reply_error = None;
         }
-        ui.lab_store.slippy.preview = None;
+        close_preview(ui);
         handle.select(ts);
     }
 }
@@ -403,7 +459,7 @@ fn attachments(ui: &Ui, p: Paint, ts: &str, files: &[slippy::AttachmentMeta]) ->
             .children(files.iter().map(|file| {
                 let key = (ts.to_owned(), file.id.clone());
                 let failed = !file.mime_type.starts_with("image/")
-                    || matches!(data.snapshot.images.get(&key), Some(None))
+                    || matches!(data.snapshot.thumbs.get(&key), Some(None))
                     || data
                         .decoded
                         .get(&key)
@@ -425,7 +481,7 @@ fn attachments(ui: &Ui, p: Paint, ts: &str, files: &[slippy::AttachmentMeta]) ->
                     .label(&file.name)
                     .cursor(Cursor::Pointer)
                     .pixels_fit(image.pixels(), SurfaceFit::Fill)
-                    .on_press(move |ui: &mut Ui| ui.lab_store.slippy.preview = Some(key.clone()))
+                    .on_press(move |ui: &mut Ui| open_preview(ui, key.clone()))
                     .child(
                         el().absolute(0.0, 0.0)
                             .size(THUMB, THUMB)
@@ -441,7 +497,7 @@ fn attachments(ui: &Ui, p: Paint, ts: &str, files: &[slippy::AttachmentMeta]) ->
 fn preview(ui: &Ui, p: Paint) -> Option<[El; 2]> {
     let data = &ui.lab_store.slippy;
     let key = data.preview.as_ref()?;
-    let image = data.ready(key)?;
+    let thumb = data.ready(key)?;
     let name = data
         .snapshot
         .detail
@@ -455,11 +511,22 @@ fn preview(ui: &Ui, p: Paint) -> Option<[El; 2]> {
                 .find(|file| file.id == key.1)
         })
         .map_or_else(|| key.1.clone(), |file| file.name.clone());
-    // Hex's uploads are Retina captures: two pixels to the point.
-    let [width, height] = image.size()?.map(|edge| edge.max(1) as f32 / 2.0);
-    let contain = (PREVIEW.0 / width).min(PREVIEW.1 / height);
-    let fit = contain.min((PREVIEW_MIN / width.max(height)).max(1.0));
-    let close = |ui: &mut Ui| ui.lab_store.slippy.preview = None;
+    let (image, (width, height)) = match data.full_ready(key) {
+        Some(full) => {
+            // Hex's uploads are Retina captures: two pixels to the point.
+            let [width, height] = full.size()?.map(|edge| edge.max(1) as f32 / 2.0);
+            let contain = (PREVIEW.0 / width).min(PREVIEW.1 / height);
+            let fit = contain.min((PREVIEW_MIN / width.max(height)).max(1.0));
+            (full, (width * fit, height * fit))
+        }
+        None => {
+            // Until it decodes, the thumbnail fills the preview's bounds.
+            let [width, height] = thumb.size()?.map(|edge| edge.max(1) as f32);
+            let fit = (PREVIEW.0 / width).min(PREVIEW.1 / height);
+            (thumb, (width * fit, height * fit))
+        }
+    };
+    let close = close_preview;
     let panel = col()
         .key("slippy-preview")
         .role("dialog")
@@ -497,7 +564,7 @@ fn preview(ui: &Ui, p: Paint) -> Option<[El; 2]> {
         .child(
             el().key("slippy-preview-image")
                 .self_center()
-                .size(width * fit, height * fit)
+                .size(width, height)
                 .radius(p.k.radius.md)
                 .clip_soft(0.0)
                 .pixels_fit(image.pixels(), SurfaceFit::Fit)

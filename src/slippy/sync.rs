@@ -6,14 +6,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use super::cache::DiskCache;
 use super::client::{Attachment, Client, Detail, Error, Origin, Role, Task};
 use crate::team_auth::{AuthError, Client as AuthClient};
 
 const LIMIT: u8 = 100;
 const FAST: Duration = Duration::from_secs(5);
 const IDLE: Duration = Duration::from_secs(60);
-/// Attachments kept in memory at once; the oldest goes first.
-pub(super) const MAX_IMAGES: usize = 24;
+/// Thumbnails kept in memory at once; the oldest goes first.
+pub(super) const MAX_IMAGES: usize = 64;
+/// Thread details kept in memory, so selecting a thread again shows it at
+/// once and asks again only once its `seq` moves.
+pub(super) const MAX_DETAILS: usize = 64;
 /// Polls a finished task waits for its detail to catch up with the list
 /// before it notifies with what the detail has.
 const LAG_RETRIES: u8 = 3;
@@ -26,8 +30,8 @@ static SERVICE: Mutex<Service> = Mutex::new(Service {
 pub(super) type Wake = Arc<dyn Fn() + Send + Sync>;
 /// A task's `ts` and one of its attachment ids.
 pub(crate) type FileKey = (String, String);
-/// Fetched attachments: the bytes, or `None` when the fetch failed for good
-/// (not found, not an image, too large). Absent while it loads.
+/// Attachments' thumbnails: the bytes, or `None` when the fetch failed for
+/// good (not found, not an image, too large). Absent while it loads.
 pub(crate) type Images = HashMap<FileKey, Option<Arc<[u8]>>>;
 type Payload = Box<dyn FnOnce() -> Result<(Origin, String, Vec<Attachment>), Error> + Send>;
 type Answer = Sender<Result<Task, Error>>;
@@ -55,6 +59,7 @@ struct Shared {
     pane: AtomicBool,
     state: Mutex<State>,
     wake: Wake,
+    cache: DiskCache,
 }
 
 #[derive(Default)]
@@ -69,7 +74,11 @@ struct State {
     /// The newest assistant message `ts` each notification checked, so a
     /// title-only change never notifies again and a new answer does.
     replies: HashMap<String, String>,
-    images: ImageCache,
+    thumbs: ImageCache,
+    /// Each thread's newest detail, by `ts`.
+    details: HashMap<String, Detail>,
+    /// The attachment the preview shows, and its full bytes once loaded.
+    preview: Option<(FileKey, Option<Arc<[u8]>>)>,
 }
 
 #[derive(Default)]
@@ -100,13 +109,19 @@ pub(crate) struct Snapshot {
     pub detail: Option<Result<Detail, Error>>,
     pub error: Option<Error>,
     pub needs_reauth: bool,
-    pub images: Images,
+    pub thumbs: Images,
+    /// The open preview's full-size image, once loaded.
+    pub preview_image: Option<(FileKey, Arc<[u8]>)>,
 }
 
 enum Command {
     Stop,
+    /// A timed poll: the selected thread is asked again only once it moved.
+    Poll,
+    /// The Refresh button: the selected thread is asked again regardless.
     Refresh,
     Select,
+    Preview,
     Submit(Payload, Answer),
     Reply(String, String, Answer),
 }
@@ -173,7 +188,7 @@ pub(super) fn reconcile_with(
     if let Some(worker) = &service.worker {
         let was_open = worker.handle.shared.pane.swap(pane, Ordering::AcqRel);
         if pane && !was_open {
-            worker.handle.refresh();
+            let _ = worker.handle.send(Command::Poll);
         }
     }
 }
@@ -212,7 +227,11 @@ impl Handle {
             detail: state.detail.clone(),
             error: state.error,
             needs_reauth: state.needs_reauth,
-            images: state.images.entries.clone(),
+            thumbs: state.thumbs.entries.clone(),
+            preview_image: state
+                .preview
+                .as_ref()
+                .and_then(|(key, bytes)| Some((key.clone(), bytes.clone()?))),
         }
     }
 
@@ -227,17 +246,17 @@ impl Handle {
         words: String,
     ) -> Result<Receiver<Result<Task, Error>>, Error> {
         self.submit(move || {
-            let (name, fallback) = if origin == Origin::Screenshot {
-                ("screenshot.png", "Screenshot")
+            let (kind, fallback) = if origin == Origin::Screenshot {
+                (super::image::Kind::Screenshot, "Screenshot")
             } else {
-                ("annotation.png", "Annotation")
+                (super::image::Kind::Annotation, "Annotation")
             };
             let text = if words.trim().is_empty() {
                 fallback.into()
             } else {
                 words
             };
-            Ok((origin, text, vec![super::image::attachment(name, &bytes)?]))
+            Ok((origin, text, vec![super::image::attachment(kind, &bytes)?]))
         })
     }
 
@@ -260,16 +279,38 @@ impl Handle {
         Ok(receiver)
     }
 
+    /// Selects thread `ts`, showing its last detail at once while the
+    /// worker checks it is current.
     pub(crate) fn select(&self, ts: String) {
         self.shared.update(|state| {
             state.unread.remove(&ts);
             let same = state.selection.as_deref() == Some(&ts);
             if !same {
-                state.detail = None;
+                state.detail = state.details.get(&ts).cloned().map(Ok);
                 state.selection = Some(ts);
+                state.preview = None;
             }
         });
         let _ = self.send(Command::Select);
+    }
+
+    /// Opens attachment `key` full-size: from this Mac's cache at once, or
+    /// downloaded by the worker.
+    pub(crate) fn open_preview(&self, key: FileKey) {
+        let bytes = self.shared.cache.full(&key.0, &key.1);
+        let missing = bytes.is_none();
+        self.shared
+            .update(|state| state.preview = Some((key, bytes)));
+        if missing {
+            let _ = self.send(Command::Preview);
+        }
+    }
+
+    /// Lets the preview's full-size bytes go.
+    pub(crate) fn close_preview(&self) {
+        if self.shared.state.lock().unwrap().preview.is_some() {
+            self.shared.update(|state| state.preview = None);
+        }
     }
 
     pub(crate) fn refresh(&self) {
@@ -324,6 +365,7 @@ impl Worker {
             pane: AtomicBool::new(pane),
             state: Mutex::default(),
             wake,
+            cache: DiskCache::new(auth.cache_dir(member)),
         });
         let (commands, receiver) = mpsc::channel();
         let worker_member = member.to_owned();
@@ -338,7 +380,10 @@ impl Worker {
                 };
                 let cursor_path = auth.cursor_path(&worker_member);
                 run(&worker_shared, &client, &cursor_path, receiver);
+                // Signed out, the lab off, or another account: nothing of
+                // this member's stays behind. Quitting Hex keeps both.
                 let _ = std::fs::remove_file(cursor_path);
+                worker_shared.cache.clear();
             })?;
         Ok(Self {
             member: member.into(),
@@ -358,35 +403,48 @@ fn run(shared: &Shared, client: &Client, path: &Path, commands: Receiver<Command
         let command = match commands.recv_timeout(shared.interval()) {
             Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
             Ok(command) => command,
-            Err(RecvTimeoutError::Timeout) => Command::Refresh,
+            Err(RecvTimeoutError::Timeout) => Command::Poll,
         };
         if shared.cancelled.load(Ordering::Acquire) || shared.state.lock().unwrap().needs_reauth {
             return;
         }
         match command {
             Command::Stop => return,
-            Command::Refresh => {
+            Command::Poll | Command::Refresh => {
                 poll(shared, client, path, &mut cursor);
-                detail(shared, client);
+                detail(shared, client, matches!(command, Command::Refresh));
             }
-            Command::Select => detail(shared, client),
+            Command::Select => detail(shared, client, false),
+            Command::Preview => preview(shared, client),
             Command::Submit(prepare, answer) => {
+                let mut sent = Vec::new();
                 let result = prepare().and_then(|(origin, text, files)| {
                     if shared.cancelled.load(Ordering::Acquire) {
                         return Err(Error::Unavailable);
                     }
-                    client
-                        .create(origin, &text, &files)
-                        .map(|created| created.task)
+                    let created = client.create(origin, &text, &files)?;
+                    sent = files
+                        .into_iter()
+                        .filter(|file| file.mime_type.starts_with("image/"))
+                        .map(|file| file.raw)
+                        .collect();
+                    Ok(created.task)
                 });
+                let ts = result.as_ref().ok().map(|task| task.ts.clone());
                 finish(shared, result, answer);
+                // What this Mac sent never downloads again.
+                if let Some(ts) = ts {
+                    for (index, bytes) in sent.iter().enumerate() {
+                        shared.cache.stage(&ts, index, bytes);
+                    }
+                }
                 poll(shared, client, path, &mut cursor);
             }
             Command::Reply(ts, text, answer) => {
                 let result = client.reply(&ts, &text).map(|reply| reply.task);
                 finish(shared, result, answer);
                 poll(shared, client, path, &mut cursor);
-                detail(shared, client);
+                detail(shared, client, false);
             }
         }
     }
@@ -408,37 +466,119 @@ fn report(shared: &Shared, error: Error) {
     });
 }
 
-fn detail(shared: &Shared, client: &Client) {
+/// Shows the selected thread: its kept detail while that is as new as the
+/// list's task (unless `force`), else a fresh one. A transient failure
+/// keeps the kept detail on screen.
+fn detail(shared: &Shared, client: &Client, force: bool) {
     if !shared.pane.load(Ordering::Acquire) {
         return;
     }
-    let Some(ts) = shared.state.lock().unwrap().selection.clone() else {
-        return;
+    let (ts, kept) = {
+        let state = shared.state.lock().unwrap();
+        let Some(ts) = state.selection.clone() else {
+            return;
+        };
+        let kept = (!force).then(|| current(&state, &ts)).flatten();
+        (ts, kept)
     };
-    let result = client.detail(&ts);
-    if result == Err(Error::Auth(AuthError::Refresh)) {
-        report(shared, Error::Auth(AuthError::Refresh));
-    }
-    let loaded = result.as_ref().ok().cloned();
-    shared.update(|state| {
-        if state.selection.as_deref() == Some(&ts) {
-            state.detail = Some(result);
+    let loaded = match kept {
+        Some(detail) => {
+            let shown = matches!(
+                &shared.state.lock().unwrap().detail,
+                Some(Ok(shown)) if *shown == detail
+            );
+            if !shown {
+                shared.update(|state| {
+                    if state.selection.as_deref() == Some(&ts) {
+                        state.detail = Some(Ok(detail.clone()));
+                    }
+                });
+            }
+            Some(detail)
         }
-    });
+        None => {
+            let result = client.detail(&ts);
+            if result == Err(Error::Auth(AuthError::Refresh)) {
+                report(shared, Error::Auth(AuthError::Refresh));
+            }
+            let loaded = result.as_ref().ok().cloned();
+            shared.update(|state| {
+                if let Ok(detail) = &result {
+                    remember(state, detail.clone());
+                }
+                if state.selection.as_deref() != Some(&ts) {
+                    return;
+                }
+                let keep = matches!(result, Err(error) if error != Error::Rejected(404))
+                    && matches!(&state.detail, Some(Ok(shown)) if shown.task.ts == ts);
+                if !keep {
+                    state.detail = Some(result);
+                }
+            });
+            loaded
+        }
+    };
     if let Some(detail) = loaded {
-        images(shared, client, &detail);
+        thumbs(shared, client, &detail);
     }
 }
 
-/// Fetches the selected thread's image attachments not yet in memory. A
-/// transient failure leaves the image loading for the next detail; one that
-/// won't change (not found, not an image) shows the file's name instead.
-fn images(shared: &Shared, client: &Client, detail: &Detail) {
+/// The kept detail of `ts`, if no older than the list's task.
+fn current(state: &State, ts: &str) -> Option<Detail> {
+    let detail = state.details.get(ts)?;
+    state
+        .tasks
+        .get(ts)
+        .is_none_or(|task| detail.task.seq >= task.seq)
+        .then(|| detail.clone())
+}
+
+/// Keeps `detail` unless an equally new one is kept, letting the
+/// least recently updated thread go past [`MAX_DETAILS`].
+fn remember(state: &mut State, detail: Detail) {
+    if state
+        .details
+        .get(&detail.task.ts)
+        .is_some_and(|kept| kept.task.seq > detail.task.seq)
+    {
+        return;
+    }
+    state.details.insert(detail.task.ts.clone(), detail);
+    while state.details.len() > MAX_DETAILS {
+        let oldest = state
+            .details
+            .values()
+            .filter(|kept| state.selection.as_deref() != Some(&kept.task.ts))
+            .min_by_key(|kept| (kept.task.updated_at, kept.task.seq))
+            .map(|kept| kept.task.ts.clone());
+        match oldest {
+            Some(ts) => state.details.remove(&ts),
+            None => break,
+        };
+    }
+}
+
+/// Loads the selected thread's image thumbnails not yet in memory: from
+/// this Mac's cache, from an upload Hex just sent, or downloaded (and kept)
+/// once. A transient failure leaves the image loading for the next detail;
+/// one that won't change (not found, not an image) shows the file's name
+/// instead.
+fn thumbs(shared: &Shared, client: &Client, detail: &Detail) {
+    let is_image = |file: &&super::AttachmentMeta| file.mime_type.starts_with("image/");
+    // The task's first message carries the files Hex uploaded, in order.
+    let sent: Vec<&str> = detail
+        .messages
+        .iter()
+        .find(|message| message.role == Role::User)
+        .into_iter()
+        .flat_map(|message| message.files.iter().filter(is_image))
+        .map(|file| file.id.as_str())
+        .collect();
     let wanted = detail
         .messages
         .iter()
         .flat_map(|message| &message.files)
-        .filter(|file| file.mime_type.starts_with("image/"))
+        .filter(is_image)
         .map(|file| (detail.task.ts.clone(), file.id.clone()))
         .take(MAX_IMAGES);
     for key in wanted {
@@ -449,29 +589,65 @@ fn images(shared: &Shared, client: &Client, detail: &Detail) {
             .state
             .lock()
             .unwrap()
-            .images
+            .thumbs
             .entries
             .contains_key(&key)
         {
             continue;
         }
-        let bytes = match client.file(&key.0, &key.1) {
-            Ok((mime, bytes)) => {
-                (mime.starts_with("image/") && !bytes.is_empty()).then(|| Arc::from(bytes))
-            }
-            Err(Error::Auth(AuthError::Refresh)) => {
-                report(shared, Error::Auth(AuthError::Refresh));
-                return;
-            }
-            Err(Error::Rejected(status)) if status < 500 && status != 429 => None,
-            Err(Error::Response) => None,
-            Err(_) => return,
-        };
-        if bytes.is_none() {
-            tracing::warn!(target: "hex::slippy", ts = %key.0, file = %key.1, "Slippy attachment unavailable");
+        if let Some(index) = sent.iter().position(|id| *id == key.1) {
+            shared.cache.claim(&key.0, index, &key.1);
         }
-        shared.update(|state| state.images.insert(key, bytes));
+        if let Some(thumb) = shared.cache.thumb(&key.0, &key.1) {
+            shared.update(|state| state.thumbs.insert(key, Some(thumb)));
+            continue;
+        }
+        let thumb = match download(shared, client, &key) {
+            Ok(Some(bytes)) => Some(shared.cache.store(&key.0, &key.1, &bytes)),
+            Ok(None) => None,
+            Err(()) => return,
+        };
+        shared.update(|state| state.thumbs.insert(key, thumb));
     }
+}
+
+/// Downloads the open preview's full-size image when this Mac has none.
+fn preview(shared: &Shared, client: &Client) {
+    let Some((key, None)) = shared.state.lock().unwrap().preview.clone() else {
+        return;
+    };
+    let Ok(Some(bytes)) = download(shared, client, &key) else {
+        return;
+    };
+    let thumb = shared.cache.store(&key.0, &key.1, &bytes);
+    let full = Arc::<[u8]>::from(bytes);
+    shared.update(|state| {
+        if state.preview.as_ref().is_some_and(|(open, _)| *open == key) {
+            state.preview = Some((key.clone(), Some(full)));
+        }
+        if !state.thumbs.entries.contains_key(&key) {
+            state.thumbs.insert(key, Some(thumb));
+        }
+    });
+}
+
+/// An attachment's bytes: `Ok(None)` when it won't load (not found, not an
+/// image), `Err` for a failure worth trying again.
+fn download(shared: &Shared, client: &Client, key: &FileKey) -> Result<Option<Vec<u8>>, ()> {
+    let bytes = match client.file(&key.0, &key.1) {
+        Ok((mime, bytes)) => (mime.starts_with("image/") && !bytes.is_empty()).then_some(bytes),
+        Err(Error::Auth(AuthError::Refresh)) => {
+            report(shared, Error::Auth(AuthError::Refresh));
+            return Err(());
+        }
+        Err(Error::Rejected(status)) if status < 500 && status != 429 => None,
+        Err(Error::Response) => None,
+        Err(_) => return Err(()),
+    };
+    if bytes.is_none() {
+        tracing::warn!(target: "hex::slippy", ts = %key.0, file = %key.1, "Slippy attachment unavailable");
+    }
+    Ok(bytes)
 }
 
 fn upsert(state: &mut State, task: Task) {
@@ -643,6 +819,7 @@ fn settle(
         .is_none_or(|previous| previous.status != task.status);
     let mut notify = status_changed;
     shared.update(|state| {
+        remember(state, detail.clone());
         if let Some(reply) = reply {
             let answered = match state.replies.get(&task.ts) {
                 Some(seen) => *seen != reply.ts,
@@ -678,6 +855,14 @@ fn settle(
     }
     cursor.lagging = None;
     Ok(Settled::Handled)
+}
+
+#[cfg(test)]
+impl Handle {
+    /// A timed poll now, as the interval sends.
+    pub(super) fn poll_now(&self) {
+        let _ = self.send(Command::Poll);
+    }
 }
 
 #[cfg(test)]
