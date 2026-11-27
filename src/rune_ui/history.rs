@@ -788,6 +788,10 @@ pub(super) fn pane(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> (Vec<El>, El) {
                     meta.push_str(" · ");
                     meta.push_str(application);
                 }
+                #[cfg_attr(not(target_os = "macos"), expect(unused_mut))]
+                let mut hover = vec![copy_action(ui, p, id, true)];
+                #[cfg(target_os = "macos")]
+                hover.extend(super::labs::slippy::history_action(ui, p, entry));
                 let primary = pane.selected == Some(id);
                 let selected_below = rows.peek().is_some_and(|(_, (_, selected))| *selected);
                 list = list.child(
@@ -800,7 +804,7 @@ pub(super) fn pane(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> (Vec<El>, El) {
                             meta_ink: None,
                             note: None,
                             time: event_age(entry.timestamp_ms),
-                            hover: vec![copy_action(ui, p, id, true)],
+                            hover,
                             selected,
                         },
                         move |row| {

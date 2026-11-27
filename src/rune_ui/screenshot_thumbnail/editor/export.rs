@@ -176,6 +176,11 @@ pub(super) fn deliver(out: &Out, png: &[u8], words: &str) -> anyhow::Result<()> 
             let text = if words.is_empty() { SEND_TEXT } else { words };
             crate::capture_host::send_image(&dest.session, text, &path)
         }
+        Out::Slippy => crate::rune_ui::labs::slippy::send_image(
+            crate::slippy::Origin::Screenshot,
+            png.to_vec(),
+            words,
+        ),
     }
 }
 
@@ -222,6 +227,19 @@ impl ClipExport {
                 let sheet = save::write(&scratch(), &encode(*w, *h, rgba, 1.0)?)?;
                 let text = clip_text(&self.words, &movie, self.length_ms);
                 crate::capture_host::send_image(&dest.session, &text, &sheet)
+            }
+            // The sheet and words alone: the movie stays on this Mac.
+            Out::Slippy => {
+                let (w, h, rgba) = self
+                    .sheet
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("the recording has no frames"))?;
+                let sheet = encode(*w, *h, rgba, 1.0)?;
+                crate::rune_ui::labs::slippy::send_image(
+                    crate::slippy::Origin::Annotate,
+                    sheet,
+                    &self.words,
+                )
             }
         }
     }

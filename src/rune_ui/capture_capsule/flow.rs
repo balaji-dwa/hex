@@ -369,6 +369,9 @@ pub(crate) enum Action {
     Inspect,
     /// The pen: drawing on until it's clicked again.
     Pen,
+    /// Send the written capture to Slippy: never an OpenCode send, Undo,
+    /// or rule.
+    SendSlippy(std::path::PathBuf),
 }
 
 /// The glyph before the finished capsule's label.
@@ -592,6 +595,8 @@ pub(crate) struct Done {
     pub(crate) open: Option<(TextEdit, List)>,
     pub(crate) inspect: bool,
     pub(crate) paste: bool,
+    /// The Slippy button's label, set by the host when signed in.
+    pub(crate) slippy: Option<&'static str>,
     /// The guesses in the capsule itself, picked with a click: chips
     /// in the menu-bar flow, rows in the cursor's card and the notch.
     /// Each is a name and its quiet reason.
@@ -630,6 +635,7 @@ impl Done {
             open: None,
             inspect: false,
             paste: false,
+            slippy: None,
             picks: Vec::new(),
             cycle: false,
             sends: false,

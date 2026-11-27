@@ -602,6 +602,13 @@ pub(crate) fn act(action: Action) {
         Action::Copy(bundle) => vec![command(CaptureCommand::Copy(bundle))],
         Action::Paste(bundle) => vec![command(CaptureCommand::Paste(bundle))],
         Action::Inspect => vec![command(CaptureCommand::Inspect)],
+        Action::SendSlippy(bundle) => {
+            #[cfg(target_os = "macos")]
+            crate::rune_ui::labs::slippy::capsule::send(bundle);
+            #[cfg(not(target_os = "macos"))]
+            let _ = bundle;
+            return;
+        }
         Action::Allow(need) => {
             crate::capture_host::allow_permission(need);
             return;

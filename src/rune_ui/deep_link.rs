@@ -20,6 +20,8 @@ pub(crate) enum Target {
     Labs(LabsLink),
     /// A main pane, by its link name.
     Settings(String),
+    #[cfg(target_os = "macos")]
+    Slippy(String),
 }
 
 impl LabsLink {
@@ -66,6 +68,10 @@ pub(crate) fn parse(link: &str, scheme: &str) -> Option<Result<Target, String>> 
         return None;
     }
     let host = url.host_str()?;
+    #[cfg(target_os = "macos")]
+    if host == "slippy" {
+        return Some(super::labs::slippy::parse_link(&url).map(Target::Slippy));
+    }
     if host != "labs" && host != "settings" {
         return None;
     }
@@ -95,6 +101,8 @@ pub(crate) fn labs_link(scheme: &str, feature: crate::labs::Feature) -> String {
 /// Opens the window's page for `target`; the caller brings the window forward.
 pub(crate) fn open(ui: &mut Ui, target: Target, tx: &mut Tx) {
     match target {
+        #[cfg(target_os = "macos")]
+        Target::Slippy(ts) => super::labs::slippy::open_link(ui, ts, tx),
         Target::Labs(link) => super::labs::reveal(ui, &link, tx),
         Target::Settings(name) => {
             let pane = PANES

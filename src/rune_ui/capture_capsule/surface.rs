@@ -248,6 +248,8 @@ pub(crate) enum Id {
     OpenRules,
     /// Pastes the capture.
     Paste,
+    /// Sends the capture to Slippy.
+    Slippy,
     /// The Send to… chip.
     Ask,
     Search,
@@ -299,6 +301,7 @@ impl Id {
             Id::AlwaysSave => "always-save",
             Id::OpenRules => "open-rules",
             Id::Paste => "paste",
+            Id::Slippy => "slippy",
             Id::Ask => "ask",
             Id::Search => "search",
             Id::Inspect => "inspect",
@@ -327,10 +330,14 @@ impl Id {
     /// `self_active` / `next_active` distinguish a filled pill `Id::Ask`
     /// (Allow, Restart Hex, Try again) from plain text asks.
     fn gap_before(self, self_active: bool, next: Id, next_active: bool) -> f32 {
-        let next_button = matches!(next, Id::Paste | Id::Undo | Id::Split | Id::Always)
-            || (next == Id::Ask && next_active);
-        let self_button = matches!(self, Id::Paste | Id::Undo | Id::Split | Id::Always)
-            || (self == Id::Ask && self_active);
+        let next_button = matches!(
+            next,
+            Id::Paste | Id::Slippy | Id::Undo | Id::Split | Id::Always
+        ) || (next == Id::Ask && next_active);
+        let self_button = matches!(
+            self,
+            Id::Paste | Id::Slippy | Id::Undo | Id::Split | Id::Always
+        ) || (self == Id::Ask && self_active);
         match (self, next) {
             (Id::Done, Id::Why) => CHIP_GAP,
             // The field's well starts the label's trail after it: 12 pt,
@@ -381,6 +388,7 @@ impl Id {
             Id::Split => 14,
             Id::Paste => 14,
             Id::Inspect => 15,
+            Id::Slippy => 16,
             Id::QuickSend
             | Id::More
             | Id::AlwaysScopeNarrow
@@ -630,6 +638,15 @@ fn done_row(done: &Done, cap: f32, raw: &mut Vec<(Id, String, f32, bool)>) {
                 raw.push((Id::Ask, ask.clone(), width, false));
             }
         }
+    }
+    if let Some(label) = done.slippy {
+        let label = tr(label);
+        raw.push((
+            Id::Slippy,
+            label.into(),
+            keyed_width(&[], label, medium()).max(44.0),
+            false,
+        ));
     }
     raw.push((Id::Close, String::new(), CHIP_H, false));
 }

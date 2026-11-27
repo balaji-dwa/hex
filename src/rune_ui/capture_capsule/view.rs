@@ -623,6 +623,19 @@ pub(super) fn item(p: Paint, surface: &Surface, live: &Animated, shown: &Shown) 
             .help(tr("Paste into the current field"))
             .hit()
             .on_press_tx(press(id)),
+        Id::Slippy => base
+            .child(
+                button_box(p, shown.rect[2] - 2.0 * surface::BUTTON_INSET).child(label(
+                    &shown.ident,
+                    medium(),
+                    p.muted(),
+                )),
+            )
+            .role("button")
+            .label(shown.ident.clone())
+            .help(tr("Sends this image and transcript to Slippy"))
+            .hit()
+            .on_press_tx(press(id)),
         Id::Inspect => base.child(
             button_box(p, BUTTON_H)
                 .child(mark(id, 16.0, p.muted()))

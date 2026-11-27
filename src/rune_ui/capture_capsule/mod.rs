@@ -659,7 +659,10 @@ impl CapsuleState {
 
     /// Moves the surface to what the flow shows. True when it changed.
     fn present(&mut self, now: f64) -> bool {
-        let pres = self.with_thumb(self.flow.pres(now));
+        #[cfg_attr(not(target_os = "macos"), expect(unused_mut))]
+        let mut pres = self.with_thumb(self.flow.pres(now));
+        #[cfg(target_os = "macos")]
+        crate::rune_ui::labs::slippy::capsule::decorate(&mut pres, self.flow.slippy_bundle());
         if !matches!(pres, Pres::Recording { .. } | Pres::Selecting { .. }) {
             self.recording_since = None;
         }
@@ -728,6 +731,10 @@ fn poll(s: &mut CapsuleState, now: f64, tx: &mut Tx) -> bool {
     }
     changed |= s.flow.tick(now);
     s.sound();
+    #[cfg(target_os = "macos")]
+    if crate::rune_ui::labs::slippy::capsule::pending() {
+        tx.wake_after(Duration::from_millis(100));
+    }
     changed |= s.present(now);
     changed |= s.surface.tick(now);
     // Whether the overlay is up this poll: the capsule stays up while it

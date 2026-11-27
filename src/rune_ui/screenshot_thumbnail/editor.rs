@@ -96,6 +96,8 @@ enum Out {
     /// To the file the save panel chose.
     Save(PathBuf),
     Send(Dest),
+    /// To Slippy, with the spoken words (Labs › Team sign-in).
+    Slippy,
 }
 
 /// The toolbar button an export was pressed on, which shows its progress.
@@ -104,6 +106,7 @@ enum Pressed {
     Copy,
     Save,
     Send,
+    Slippy,
 }
 
 impl Out {
@@ -112,6 +115,7 @@ impl Out {
             Self::Copy => Pressed::Copy,
             Self::Save(_) => Pressed::Save,
             Self::Send(_) => Pressed::Send,
+            Self::Slippy => Pressed::Slippy,
         }
     }
 }
@@ -609,6 +613,8 @@ impl Editor {
         };
         if let Out::Send(dest) = &out {
             self.note(tr_fill("Sending to {}…", &dest.name), tx);
+        } else if let Out::Slippy = out {
+            self.note(tr("Sending to Slippy…").to_owned(), tx);
         }
         let words = self.words.trim().to_owned();
         let overlay = self.overlay.clone();
@@ -625,6 +631,7 @@ impl Editor {
                             Out::Copy => tr("Copied").to_owned(),
                             Out::Save(path) => return saved(&overlay, path, None),
                             Out::Send(dest) => tr_fill("Sent to {}", &dest.name),
+                            Out::Slippy => tr("Sent to Slippy").to_owned(),
                         };
                         overlay.update(move |s, tx| s.note(note, tx));
                     }
@@ -654,7 +661,9 @@ impl Editor {
             return;
         }
         let settings = crate::app_settings::screenshot_settings();
-        let shrink = clip::Shrink::of(self.export_size, &settings);
+        // Slippy gets the contact sheet alone: nothing to shrink.
+        let shrink =
+            clip::Shrink::of(self.export_size, &settings).filter(|_| !matches!(out, Out::Slippy));
         let job = export::ClipExport {
             movie: clip.movie.clone(),
             trim: clip.trimmed().then_some(clip.trim),
@@ -669,6 +678,8 @@ impl Editor {
             tx.animated();
         } else if let Out::Send(dest) = &out {
             self.note(tr_fill("Sending to {}…", &dest.name), tx);
+        } else if let Out::Slippy = out {
+            self.note(tr("Sending to Slippy…").to_owned(), tx);
         }
         let overlay = self.overlay.clone();
         let generation = self.generation;
@@ -706,6 +717,7 @@ impl Editor {
                                 return saved(&overlay, path, Some(generation));
                             }
                             Out::Send(dest) => tr_fill("Sent to {}", &dest.name),
+                            Out::Slippy => tr("Sent to Slippy").to_owned(),
                         };
                         overlay.update(move |s, tx| {
                             if s.generation == generation {
@@ -797,7 +809,7 @@ fn export_failure(error: &anyhow::Error, out: &Out) -> String {
     match out {
         Out::Copy => tr("Couldn't copy").to_owned(),
         Out::Save(_) => tr("Couldn't save").to_owned(),
-        Out::Send(_) => tr("Couldn't send").to_owned(),
+        Out::Send(_) | Out::Slippy => tr("Couldn't send").to_owned(),
     }
 }
 

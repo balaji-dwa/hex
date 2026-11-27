@@ -460,6 +460,7 @@ impl Playground {
             | Action::Pen
             | Action::Hold(_)
             | Action::Inspect
+            | Action::SendSlippy(_)
             | Action::SaveRule { .. }
             | Action::OpenRules => {}
         }

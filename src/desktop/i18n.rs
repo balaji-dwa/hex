@@ -421,6 +421,7 @@ pub(super) fn all_translations() -> impl Iterator<Item = &'static (&'static str,
         .chain(history::TRANSLATIONS)
         .chain(screenshots::TRANSLATIONS)
         .chain(routing::TRANSLATIONS)
+        .chain(personal_labs::TRANSLATIONS)
 }
 
 #[cfg(test)]
@@ -641,6 +642,9 @@ mod tests {
         include_str!("../rune_ui/hud_lab.rs"),
         include_str!("../rune_ui/labs.rs"),
         include_str!("../rune_ui/labs/team_auth.rs"),
+        include_str!("../rune_ui/labs/slippy/mod.rs"),
+        include_str!("../rune_ui/labs/slippy/pane.rs"),
+        include_str!("../rune_ui/labs/slippy/dictation_pill.rs"),
         include_str!("../rune_ui/labs/group.rs"),
         include_str!("../rune_ui/labs/clipboard_phrase.rs"),
         include_str!("../rune_ui/labs/hud_height.rs"),

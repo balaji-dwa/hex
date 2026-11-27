@@ -528,6 +528,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool
         )
     };
     let planner = crate::rune_ui::planner::macos::install(&mut app);
+    crate::rune_ui::labs::slippy::install(&mut app);
     let hud = crate::rune_hud::install(&mut app);
     crate::rune_ui::live_text::install(&mut app, crate::rune_hud::live_text_place);
     #[cfg(hex_capture)]

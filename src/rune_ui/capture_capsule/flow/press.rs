@@ -2,6 +2,20 @@
 use super::*;
 
 impl Flow {
+    /// The written capture the finished capsule shows, for Slippy.
+    pub(crate) fn slippy_bundle(&self) -> Option<&std::path::PathBuf> {
+        let (bundle, _) = self.written.as_ref()?;
+        matches!(
+            self.phase,
+            Phase::Saved { .. }
+                | Phase::Routed(_)
+                | Phase::Sent(_)
+                | Phase::Queued { .. }
+                | Phase::Kept { .. }
+        )
+        .then_some(bundle)
+    }
+
     pub(super) fn paste_bundle(&self) -> Option<&std::path::PathBuf> {
         if self.uncopied {
             return None;
@@ -110,6 +124,12 @@ impl Flow {
                 self.phase = Phase::Dismissed;
                 vec![Action::Paste(bundle)]
             }
+            (_, Id::Slippy) => self
+                .slippy_bundle()
+                .cloned()
+                .map(Action::SendSlippy)
+                .into_iter()
+                .collect(),
             (_, Id::Inspect) => {
                 self.phase = Phase::Dismissed;
                 vec![Action::Inspect]

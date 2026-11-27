@@ -41,7 +41,17 @@ pub(super) fn deliver_completed(
     let outcome = deliver(input, history, &mut adapter)?;
     let text = match outcome {
         DeliveryOutcome::VoicePromptNothing | DeliveryOutcome::EmptyOutput => String::new(),
-        DeliveryOutcome::Delivered { text, .. } => text,
+        DeliveryOutcome::Delivered { text, copied, .. } => {
+            if !copied
+                && matches!(
+                    target,
+                    TranscriptionTarget::Paste | TranscriptionTarget::RawPaste
+                )
+            {
+                crate::rune_ui::labs::slippy::offer_dictation(&text);
+            }
+            text
+        }
     };
     tracing::info!(
         audio_ms = timings.audio_ms,

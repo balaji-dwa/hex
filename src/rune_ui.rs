@@ -34,7 +34,7 @@ mod hud_lab;
 #[cfg(target_os = "macos")]
 mod hud_stories;
 mod icons;
-mod labs;
+pub(crate) mod labs;
 mod list_detail;
 mod lists;
 mod live_notes;
@@ -1549,6 +1549,8 @@ fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         Pane::Modes => modes::pane(ui, p, &mut layer),
         Pane::History => history::pane(ui, p, &mut layer),
         Pane::Planner => (Vec::new(), planner::pane(ui, p)),
+        #[cfg(target_os = "macos")]
+        Pane::Slippy => labs::slippy::view(ui, p),
         Pane::Meetings => meetings::pane(ui, p, &mut layer),
         #[cfg(hex_capture)]
         Pane::Annotate => (Vec::new(), scrawl::pane(ui, p, &mut layer)),

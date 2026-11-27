@@ -77,6 +77,22 @@ impl Card {
         self.next_refresh = None;
     }
 
+    #[cfg(target_os = "macos")]
+    pub(in crate::rune_ui) fn needs_reauth(&mut self, member: &str, error: AuthError) {
+        if matches!(&self.state, AuthState::SignedIn { member_sub, .. } if member_sub == member) {
+            self.state = reauth(&self.state, error);
+            self.next_refresh = None;
+            if let Some(job) = &self.job {
+                job.cancel.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(in crate::rune_ui) fn signed_out(&self) -> bool {
+        self.checked && self.job.is_none() && !matches!(self.state, AuthState::SignedIn { .. })
+    }
+
     fn start(&mut self, action: Action) -> bool {
         if self.job.is_some() {
             return false;
@@ -94,15 +110,31 @@ impl Card {
             return true;
         }
         self.job = Some(Job { cancel, result });
-        if matches!(action, Action::SignIn) {
-            self.state = AuthState::SigningIn {
-                started_at_ms: now_ms(),
-            };
+        match action {
+            Action::SignIn => {
+                self.state = AuthState::SigningIn {
+                    started_at_ms: now_ms(),
+                }
+            }
+            Action::SignOut => {
+                self.state = AuthState::SignedOut;
+                self.next_refresh = None;
+                #[cfg(target_os = "macos")]
+                crate::slippy::sign_out();
+            }
+            Action::Check => {}
         }
         true
     }
 
-    fn poll(&mut self, enabled: bool, visible: bool, tx: &mut Tx) -> bool {
+    /// A check starts at launch once the lab is on, whether or not the
+    /// window is open, so Slippy's worker and notifications start too; then
+    /// again when the access token is due.
+    fn check_due(&self, enabled: bool) -> bool {
+        enabled && (!self.checked || self.next_refresh.is_some_and(|at| now_ms() >= at))
+    }
+
+    fn poll(&mut self, enabled: bool, tx: &mut Tx) -> bool {
         let mut changed = false;
         if let Some(job) = &self.job {
             let result = match job.result.try_recv() {
@@ -133,14 +165,14 @@ impl Card {
             self.job = None;
             changed = true;
         }
-        if enabled
-            && visible
-            && (!self.checked || self.next_refresh.is_some_and(|at| now_ms() >= at))
-        {
+        if self.check_due(enabled) {
             self.checked = true;
             self.next_refresh = None;
             changed |= self.start(Action::Check);
             tx.wake_after(Duration::from_millis(100));
+        }
+        if enabled && let Some(at) = self.next_refresh {
+            tx.wake_after(Duration::from_millis(at.saturating_sub(now_ms())));
         }
         changed
     }
@@ -160,14 +192,19 @@ fn reauth(state: &AuthState, error: AuthError) -> AuthState {
 
 pub(in crate::rune_ui) fn poll(ui: &mut Ui, tx: &mut Tx) -> bool {
     let enabled = ui.live() && crate::labs::team_auth(&ui.settings);
-    let visible = ui.labs_open && ui.window.as_ref().is_some_and(rune::AppHandle::is_visible);
-    ui.lab_store.team_auth.poll(enabled, visible, tx)
+    let changed = ui.lab_store.team_auth.poll(enabled, tx);
+    // Slippy follows the session: started, stopped, or its account changed.
+    #[cfg(target_os = "macos")]
+    let changed = super::slippy::poll(ui, tx) | changed;
+    changed
 }
 
 /// Turning the lab off cancels any work in progress; the saved session stays.
 pub(in crate::rune_ui) fn settings_changed(ui: &mut Ui) {
     if !crate::labs::team_auth(&ui.settings) {
         ui.lab_store.team_auth.disable();
+        #[cfg(target_os = "macos")]
+        crate::slippy::sign_out();
     }
 }
 
@@ -256,8 +293,40 @@ mod tests {
         let settings = crate::app_settings::AppSettings::default();
         assert!(!settings.labs.team_auth);
         let mut card = Card::default();
-        assert!(!card.poll(crate::labs::team_auth(&settings), true, &mut Tx::default()));
+        assert!(!card.poll(crate::labs::team_auth(&settings), &mut Tx::default()));
         assert!(card.job.is_none());
         assert!(!card.checked);
+    }
+
+    #[test]
+    fn the_session_is_checked_at_launch_without_the_window() {
+        let mut card = Card::default();
+        // Nothing about the window or Labs being open decides it.
+        assert!(card.check_due(true));
+        assert!(!card.check_due(false));
+        card.checked = true;
+        assert!(!card.check_due(true));
+        card.next_refresh = Some(now_ms().saturating_sub(1));
+        assert!(card.check_due(true));
+        card.next_refresh = Some(now_ms() + 60_000);
+        assert!(!card.check_due(true));
+    }
+
+    #[test]
+    fn signing_out_stops_slippy_at_once_and_expiry_needs_sign_in() {
+        let mut card = Card {
+            state: AuthState::SignedIn {
+                email: "nick@dwa1.com".into(),
+                member_sub: "member".into(),
+                expires_at_ms: None,
+            },
+            checked: true,
+            ..Card::default()
+        };
+        card.needs_reauth("someone-else", AuthError::Refresh);
+        assert!(matches!(card.state, AuthState::SignedIn { .. }));
+        card.needs_reauth("member", AuthError::Refresh);
+        assert!(matches!(card.state, AuthState::NeedsReauth { .. }));
+        assert!(card.signed_out());
     }
 }

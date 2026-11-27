@@ -13,6 +13,8 @@ mod hud_height;
 #[cfg(all(target_os = "macos", hex_capture))]
 pub(super) mod screenshots;
 mod signature;
+#[cfg(target_os = "macos")]
+pub(crate) mod slippy;
 mod stop_phrase;
 mod store;
 #[cfg(any(target_os = "macos", test))]
@@ -53,6 +55,8 @@ pub(super) fn main_panes(ui: &Ui) -> Vec<Pane> {
     if Pane::Planner.shown(ui) {
         panes.push(Pane::Planner);
     }
+    #[cfg(target_os = "macos")]
+    panes.extend([Pane::Slippy].into_iter().filter(|pane| pane.shown(ui)));
     #[cfg(hex_capture)]
     let optional = [Pane::Meetings, Pane::Annotate, Pane::VoiceFilter];
     #[cfg(not(hex_capture))]
@@ -215,6 +219,8 @@ pub(super) enum Tab {
 /// What the Labs store shows: its search, tab, and chip.
 #[derive(Default)]
 pub(super) struct Store {
+    #[cfg(target_os = "macos")]
+    pub(super) slippy: slippy::Data,
     pub(super) search: TextEdit,
     pub(super) tab: Tab,
     /// The chip selected: only this group's labs show.

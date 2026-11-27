@@ -338,6 +338,15 @@ fn toolbar(p: Paint, s: &Editor, w: f32) -> El {
             .variant(ButtonVariant::Ghost)
             .on_press_tx(|s: &mut Editor, tx| s.choose_save(tx)),
     ))
+    .children(slippy_shown().then(|| {
+        push(
+            k,
+            Button::new(pressed_label(s, Pressed::Slippy, tr("Slippy")))
+                .variant(ButtonVariant::Ghost)
+                .help(tr("Sends this image and transcript to Slippy"))
+                .on_press_tx(|s: &mut Editor, tx| s.deliver(Out::Slippy, tx)),
+        )
+    }))
     .child(push(
         k,
         Button::new(pressed_label(s, Pressed::Send, tr("Send to…")))
@@ -355,6 +364,14 @@ fn toolbar(p: Paint, s: &Editor, w: f32) -> El {
             .build(k)
             .key("close"),
     )
+}
+
+/// Labs › Team sign-in is on and signed in: the Slippy button shows.
+fn slippy_shown() -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::rune_ui::labs::slippy::offered();
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 /// `label`, or how far the export pressed on it is.

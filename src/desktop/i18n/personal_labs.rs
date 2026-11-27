@@ -1,6 +1,7 @@
 //! Labs › Planner's and Labs › Team sign-in's strings (this personal fork's
 //! macOS labs), kept beside the main tables so those stay under the source
-//! cap. The six-column rows live in [`super::labs`] and [`super::menu`].
+//! cap. Team sign-in's and Planner's six-column rows live in [`super::labs`]
+//! and [`super::menu`]; Slippy's are [`TRANSLATIONS`].
 
 #[rustfmt::skip]
 pub(super) const FRENCH: &[(&str, &str)] = &[
@@ -24,6 +25,24 @@ pub(super) const FRENCH: &[(&str, &str)] = &[
     ("Planner", "Planificateur"),
     ("Plan today’s focus each morning at 6 AM Eastern and review goals weekly. Turns on Launch at login; open Today’s Steps from the menu bar or Option.", "Planifiez votre priorité chaque matin à 6 h, heure de l’Est, et faites le point chaque semaine. Active le lancement à la connexion ; ouvrez Étapes du jour depuis la barre des menus ou avec Option."),
     ("Today's steps", "Étapes du jour"),
+    ("Slippy", "Slippy"),
+    ("Send to Slippy", "Envoyer à Slippy"),
+    ("Sent to Slippy", "Envoyé à Slippy"),
+    ("Sending to Slippy…", "Envoi à Slippy…"),
+    ("Sends this transcript to Slippy", "Envoie cette transcription à Slippy"),
+    ("Sends this image and transcript to Slippy", "Envoie cette image et la transcription à Slippy"),
+    ("Unread", "Non lu"),
+    ("Running", "En cours"),
+    ("Waiting", "En attente"),
+    ("Loading…", "Chargement…"),
+    ("No Slippy tasks yet", "Aucune tâche Slippy pour l’instant"),
+    ("Select a Slippy task", "Sélectionnez une tâche Slippy"),
+    ("Follow up with Slippy…", "Répondre à Slippy…"),
+    ("Enter between 1 and 12,000 characters.", "Saisissez entre 1 et 12 000 caractères."),
+    ("Couldn't prepare the image for Slippy.", "Impossible de préparer l’image pour Slippy."),
+    ("Slippy task not found.", "Tâche Slippy introuvable."),
+    ("Too many open Slippy tasks.", "Trop de tâches Slippy ouvertes."),
+    ("Couldn't reach Slippy. Try again.", "Impossible de joindre Slippy. Réessayez."),
 ];
 
 #[rustfmt::skip]
@@ -48,6 +67,24 @@ pub(super) const PORTUGUESE: &[(&str, &str)] = &[
     ("Planner", "Planejador"),
     ("Plan today’s focus each morning at 6 AM Eastern and review goals weekly. Turns on Launch at login; open Today’s Steps from the menu bar or Option.", "Planeje seu foco do dia todas as manhãs às 6h do horário do Leste e revise suas metas semanalmente. Ativa a abertura ao iniciar sessão; abra Passos de hoje pela barra de menus ou com Option."),
     ("Today's steps", "Passos de hoje"),
+    ("Slippy", "Slippy"),
+    ("Send to Slippy", "Enviar ao Slippy"),
+    ("Sent to Slippy", "Enviado ao Slippy"),
+    ("Sending to Slippy…", "Enviando ao Slippy…"),
+    ("Sends this transcript to Slippy", "Envia esta transcrição ao Slippy"),
+    ("Sends this image and transcript to Slippy", "Envia esta imagem e a transcrição ao Slippy"),
+    ("Unread", "Não lido"),
+    ("Running", "Em andamento"),
+    ("Waiting", "Aguardando"),
+    ("Loading…", "Carregando…"),
+    ("No Slippy tasks yet", "Nenhuma tarefa do Slippy ainda"),
+    ("Select a Slippy task", "Selecione uma tarefa do Slippy"),
+    ("Follow up with Slippy…", "Responder ao Slippy…"),
+    ("Enter between 1 and 12,000 characters.", "Digite de 1 a 12.000 caracteres."),
+    ("Couldn't prepare the image for Slippy.", "Não foi possível preparar a imagem para o Slippy."),
+    ("Slippy task not found.", "Tarefa do Slippy não encontrada."),
+    ("Too many open Slippy tasks.", "Há muitas tarefas do Slippy abertas."),
+    ("Couldn't reach Slippy. Try again.", "Não foi possível acessar o Slippy. Tente novamente."),
 ];
 
 #[rustfmt::skip]
@@ -72,6 +109,24 @@ pub(super) const RUSSIAN: &[(&str, &str)] = &[
     ("Planner", "Планировщик"),
     ("Plan today’s focus each morning at 6 AM Eastern and review goals weekly. Turns on Launch at login; open Today’s Steps from the menu bar or Option.", "Планируйте фокус дня каждое утро в 6:00 по восточному времени США и проверяйте цели еженедельно. Включает запуск при входе; открывайте «Шаги на сегодня» из строки меню или клавишей Option."),
     ("Today's steps", "Шаги на сегодня"),
+    ("Slippy", "Slippy"),
+    ("Send to Slippy", "Отправить в Slippy"),
+    ("Sent to Slippy", "Отправлено в Slippy"),
+    ("Sending to Slippy…", "Отправка в Slippy…"),
+    ("Sends this transcript to Slippy", "Отправляет эту расшифровку в Slippy"),
+    ("Sends this image and transcript to Slippy", "Отправляет это изображение и расшифровку в Slippy"),
+    ("Unread", "Не прочитано"),
+    ("Running", "Выполняется"),
+    ("Waiting", "Ожидает"),
+    ("Loading…", "Загрузка…"),
+    ("No Slippy tasks yet", "Задач Slippy пока нет"),
+    ("Select a Slippy task", "Выберите задачу Slippy"),
+    ("Follow up with Slippy…", "Ответить Slippy…"),
+    ("Enter between 1 and 12,000 characters.", "Введите от 1 до 12 000 символов."),
+    ("Couldn't prepare the image for Slippy.", "Не удалось подготовить изображение для Slippy."),
+    ("Slippy task not found.", "Задача Slippy не найдена."),
+    ("Too many open Slippy tasks.", "Слишком много открытых задач Slippy."),
+    ("Couldn't reach Slippy. Try again.", "Не удалось связаться со Slippy. Повторите попытку."),
 ];
 
 /// Hungarian, for the strings above.
@@ -97,4 +152,46 @@ pub(super) const HUNGARIAN: &[(&str, &str)] = &[
     ("Planner", "Tervező"),
     ("Plan today’s focus each morning at 6 AM Eastern and review goals weekly. Turns on Launch at login; open Today’s Steps from the menu bar or Option.", "Tervezze meg a nap fókuszát minden reggel 6-kor (keleti parti idő szerint), és hetente tekintse át a céljait. Bekapcsolja az indítást bejelentkezéskor; a Mai lépéseket a menüsorból vagy az Option billentyűvel nyithatja meg."),
     ("Today's steps", "Mai lépések"),
+    ("Slippy", "Slippy"),
+    ("Send to Slippy", "Küldés a Slippynek"),
+    ("Sent to Slippy", "Elküldve a Slippynek"),
+    ("Sending to Slippy…", "Küldés a Slippynek…"),
+    ("Sends this transcript to Slippy", "Elküldi ezt az átiratot a Slippynek"),
+    ("Sends this image and transcript to Slippy", "Elküldi ezt a képet és az átiratot a Slippynek"),
+    ("Unread", "Olvasatlan"),
+    ("Running", "Folyamatban"),
+    ("Waiting", "Várakozik"),
+    ("Loading…", "Betöltés…"),
+    ("No Slippy tasks yet", "Még nincs Slippy-feladat"),
+    ("Select a Slippy task", "Válasszon Slippy-feladatot"),
+    ("Follow up with Slippy…", "Válasz a Slippynek…"),
+    ("Enter between 1 and 12,000 characters.", "Írjon be 1–12 000 karaktert."),
+    ("Couldn't prepare the image for Slippy.", "Nem sikerült előkészíteni a képet a Slippy számára."),
+    ("Slippy task not found.", "A Slippy-feladat nem található."),
+    ("Too many open Slippy tasks.", "Túl sok nyitott Slippy-feladat."),
+    ("Couldn't reach Slippy. Try again.", "Nem sikerült elérni a Slippyt. Próbálja újra."),
+];
+
+/// Slippy's rows. Columns: Polish, Chinese (Simplified), Japanese, German,
+/// Spanish, Ukrainian.
+#[rustfmt::skip]
+pub(super) const TRANSLATIONS: &[(&str, [&str; 6])] = &[
+    ("Slippy", ["Slippy", "Slippy", "Slippy", "Slippy", "Slippy", "Slippy"]),
+    ("Send to Slippy", ["Wyślij do Slippy", "发送到 Slippy", "Slippy に送信", "An Slippy senden", "Enviar a Slippy", "Надіслати в Slippy"]),
+    ("Sent to Slippy", ["Wysłano do Slippy", "已发送到 Slippy", "Slippy に送信しました", "An Slippy gesendet", "Enviado a Slippy", "Надіслано в Slippy"]),
+    ("Sending to Slippy…", ["Wysyłanie do Slippy…", "正在发送到 Slippy…", "Slippy に送信中…", "Wird an Slippy gesendet…", "Enviando a Slippy…", "Надсилання в Slippy…"]),
+    ("Sends this transcript to Slippy", ["Wysyła tę transkrypcję do Slippy", "将此转录发送到 Slippy", "この文字起こしを Slippy に送信します", "Sendet dieses Transkript an Slippy", "Envía esta transcripción a Slippy", "Надсилає цю транскрипцію в Slippy"]),
+    ("Sends this image and transcript to Slippy", ["Wysyła ten obraz i transkrypcję do Slippy", "将此图像和转录发送到 Slippy", "この画像と文字起こしを Slippy に送信します", "Sendet dieses Bild und Transkript an Slippy", "Envía esta imagen y la transcripción a Slippy", "Надсилає це зображення й транскрипцію в Slippy"]),
+    ("Unread", ["Nieprzeczytane", "未读", "未読", "Ungelesen", "No leído", "Непрочитане"]),
+    ("Running", ["W toku", "进行中", "実行中", "Läuft", "En curso", "Виконується"]),
+    ("Waiting", ["Oczekuje", "等待中", "待機中", "Wartet", "En espera", "Очікує"]),
+    ("Loading…", ["Wczytywanie…", "正在加载…", "読み込み中…", "Wird geladen…", "Cargando…", "Завантаження…"]),
+    ("No Slippy tasks yet", ["Brak zadań Slippy", "还没有 Slippy 任务", "Slippy のタスクはまだありません", "Noch keine Slippy-Aufgaben", "Aún no hay tareas de Slippy", "Завдань Slippy ще немає"]),
+    ("Select a Slippy task", ["Wybierz zadanie Slippy", "选择一个 Slippy 任务", "Slippy のタスクを選択", "Slippy-Aufgabe auswählen", "Selecciona una tarea de Slippy", "Виберіть завдання Slippy"]),
+    ("Follow up with Slippy…", ["Odpowiedz Slippy…", "回复 Slippy…", "Slippy に返信…", "Slippy antworten…", "Responder a Slippy…", "Відповісти Slippy…"]),
+    ("Enter between 1 and 12,000 characters.", ["Wpisz od 1 do 12 000 znaków.", "请输入 1 到 12,000 个字符。", "1〜12,000 文字で入力してください。", "Gib 1 bis 12.000 Zeichen ein.", "Escribe entre 1 y 12.000 caracteres.", "Введіть від 1 до 12 000 символів."]),
+    ("Couldn't prepare the image for Slippy.", ["Nie udało się przygotować obrazu dla Slippy.", "无法为 Slippy 准备图像。", "Slippy 用の画像を準備できませんでした。", "Das Bild für Slippy konnte nicht vorbereitet werden.", "No se pudo preparar la imagen para Slippy.", "Не вдалося підготувати зображення для Slippy."]),
+    ("Slippy task not found.", ["Nie znaleziono zadania Slippy.", "未找到 Slippy 任务。", "Slippy のタスクが見つかりません。", "Slippy-Aufgabe nicht gefunden.", "No se encontró la tarea de Slippy.", "Завдання Slippy не знайдено."]),
+    ("Too many open Slippy tasks.", ["Zbyt wiele otwartych zadań Slippy.", "打开的 Slippy 任务过多。", "未完了の Slippy タスクが多すぎます。", "Zu viele offene Slippy-Aufgaben.", "Hay demasiadas tareas de Slippy abiertas.", "Забагато відкритих завдань Slippy."]),
+    ("Couldn't reach Slippy. Try again.", ["Nie udało się połączyć ze Slippy. Spróbuj ponownie.", "无法连接 Slippy。请重试。", "Slippy に接続できませんでした。もう一度お試しください。", "Slippy ist nicht erreichbar. Versuch es noch einmal.", "No se pudo conectar con Slippy. Inténtalo de nuevo.", "Не вдалося зв’язатися зі Slippy. Спробуйте ще раз."]),
 ];

@@ -67,6 +67,8 @@ pub(super) enum Pane {
     Meetings,
     History,
     Planner,
+    #[cfg(target_os = "macos")]
+    Slippy,
     /// Annotate (Scrawl's captures inside Hex): past annotations (or captures
     /// when Labs › Screenshots is on) and its settings, switched in the header.
     #[cfg(hex_capture)]
@@ -104,6 +106,8 @@ impl Pane {
             // Labs › Modes editor; scenes render the pane without the lab.
             Pane::Modes => ui.settings.labs.modes_editor,
             Pane::Planner => ui.platform.caps.os == platform::Os::Macos && ui.settings.labs.planner,
+            #[cfg(target_os = "macos")]
+            Pane::Slippy => super::labs::slippy::visible(ui),
             // On a Mac an ordinary item even while off: the pane itself
             // offers to turn it on. Elsewhere it shows once it is on.
             Pane::Meetings => {
@@ -127,6 +131,8 @@ impl Pane {
             Pane::Modes => tr("Modes"),
             Pane::History => tr("History"),
             Pane::Planner => tr("Planner"),
+            #[cfg(target_os = "macos")]
+            Pane::Slippy => "Slippy",
             Pane::Meetings => tr("Meetings"),
             #[cfg(hex_capture)]
             Pane::Annotate => tr("Annotate"),
@@ -144,6 +150,8 @@ impl Pane {
             Pane::Modes => "nav-modes",
             Pane::History => "nav-history",
             Pane::Planner => "nav-planner",
+            #[cfg(target_os = "macos")]
+            Pane::Slippy => "nav-slippy",
             Pane::Meetings => "nav-meetings",
             #[cfg(hex_capture)]
             Pane::Annotate => "nav-annotate",
@@ -161,6 +169,8 @@ impl Pane {
             Pane::Modes => &MODES_ICON,
             Pane::History => &HISTORY_ICON,
             Pane::Planner => &icons::PLAIN_BOOK,
+            #[cfg(target_os = "macos")]
+            Pane::Slippy => &icons::SPARKLES,
             Pane::Meetings => &MEETINGS_ICON,
             #[cfg(hex_capture)]
             Pane::Annotate => &SCRAWL_ICON,
@@ -227,6 +237,7 @@ pub(super) fn sidebar(ui: &Ui, p: Paint) -> El {
             p,
             pane,
             ui.pane == pane && !ui.labs_open,
+            unread(ui, pane),
             NAV_ROW_GAP / 2.0,
             NAV_ROW_GAP / 2.0,
         ));
@@ -238,6 +249,7 @@ pub(super) fn sidebar(ui: &Ui, p: Paint) -> El {
         p,
         Pane::WhatsNew,
         ui.pane == Pane::WhatsNew && !ui.labs_open,
+        false,
         NAV_ROW_GAP / 2.0,
         NAV_ROW_GAP / 2.0,
     ));
@@ -507,7 +519,17 @@ fn version_label() -> String {
 /// reaching halfway into the gaps around its item, so wherever the pointer
 /// is in the column, the nearest item shows its hover, and a press there
 /// selects it.
-fn nav_slot(p: Paint, pane: Pane, on: bool, above: f32, below: f32) -> El {
+fn unread(ui: &Ui, pane: Pane) -> bool {
+    #[cfg(target_os = "macos")]
+    return pane == Pane::Slippy && super::labs::slippy::unread(ui);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (ui, pane);
+        false
+    }
+}
+
+fn nav_slot(p: Paint, pane: Pane, on: bool, unread: bool, above: f32, below: f32) -> El {
     col()
         .key(format!("{}-slot", pane.key()))
         // Assistive technology sees the item alone.
@@ -519,7 +541,7 @@ fn nav_slot(p: Paint, pane: Pane, on: bool, above: f32, below: f32) -> El {
             select_on_down(ui, d, tx, pane)
         })
         .on_press_tx(move |ui: &mut Ui, tx: &mut Tx| ui.select_pane(pane, tx))
-        .child(nav_item(p, pane, on))
+        .child(nav_item(p, pane, on, unread))
 }
 
 /// Switch on pointer down, like a native sidebar; the press keeps keyboard
@@ -530,7 +552,7 @@ fn select_on_down(ui: &mut Ui, d: &mut rune::Drag, tx: &mut Tx, pane: Pane) {
     }
 }
 
-fn nav_item(p: Paint, pane: Pane, on: bool) -> El {
+fn nav_item(p: Paint, pane: Pane, on: bool, unread: bool) -> El {
     let c = &p.k.c;
     // A row of the navigation list, selected while its pane shows.
     let mut item = row()
@@ -570,6 +592,11 @@ fn nav_item(p: Paint, pane: Pane, on: bool) -> El {
                 .truncate()
                 .a11y_hidden(),
         );
+    if unread {
+        item = item
+            .description(tr("Unread"))
+            .child(super::controls::status_dot(p.accent()));
+    }
     if on {
         item = item.fill(c.layer_02);
     }
