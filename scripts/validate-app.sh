@@ -26,8 +26,9 @@ plist_value() {
 [ "$(basename "$bundle")" = "$expected_name" ] || fail "expected $expected_name, found $(basename "$bundle")"
 [ "$(plist_value CFBundleIdentifier)" = anomaly.hex ] || fail "wrong bundle identifier"
 [ "$(plist_value CFBundleExecutable)" = hex ] || fail "wrong executable name"
-[ "$(plist_value CFBundleDisplayName)" = Hex ] || fail "wrong display name"
-[ "$(plist_value CFBundleName)" = Hex ] || fail "wrong bundle name"
+expected_app_name=${expected_name%.app}
+[ "$(plist_value CFBundleDisplayName)" = "$expected_app_name" ] || fail "wrong display name"
+[ "$(plist_value CFBundleName)" = "$expected_app_name" ] || fail "wrong bundle name"
 [ "$(plist_value CFBundleShortVersionString)" = "$version" ] || fail "wrong version"
 [ "$(plist_value CFBundleVersion)" = "$build_number" ] || fail "wrong build number"
 [ "$(plist_value LSMinimumSystemVersion)" = 15.0 ] || fail "wrong minimum macOS"

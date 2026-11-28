@@ -348,6 +348,22 @@ fn build_release_config() {
         println!("cargo:rustc-env={env_name}={requirement}");
     }
 
+    println!("cargo:rerun-if-env-changed=HEX_APP_NAME");
+    if let Some(app_name) = std::env::var("HEX_APP_NAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        let trimmed = app_name.trim();
+        assert!(
+            !trimmed.is_empty()
+                && trimmed.len() <= 64
+                && !trimmed.contains('/')
+                && !trimmed.chars().any(char::is_control),
+            "HEX_APP_NAME must be 1..=64 printable characters without `/`, got {app_name:?}"
+        );
+        println!("cargo:rustc-env=HEX_BUILD_APP_NAME={trimmed}");
+    }
+
     for (source_env, target_env) in [
         ("HEX_RELEASE_ORIGIN", "HEX_BUILD_RELEASE_ORIGIN"),
         ("HEX_RELEASE_DOWNLOAD_URL", "HEX_BUILD_RELEASE_DOWNLOAD_URL"),

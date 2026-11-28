@@ -14,6 +14,7 @@ if [[ -f "$config_file" ]]; then
 fi
 
 channel="${HEX_BUILD_CHANNEL:-dev}"
+app_name="${HEX_APP_NAME:-Slippy Hex}"
 version=""
 dry_run=0
 skip_notarize=0
@@ -197,6 +198,7 @@ fi
 
 unset HEX_LOCAL_BUILD HEX_TEST_BUILD HEX_RELEASE_UNSIGNED HEX_COMMIT
 export HEX_TEAM_ID
+export HEX_APP_NAME="$app_name"
 export HEX_UPDATE_TEAM_ID="$HEX_TEAM_ID"
 export HEX_BUILD_CHANNEL="$channel"
 export HEX_VERSION="$version"
@@ -207,7 +209,7 @@ export HEX_DEV_NOTES_URL="$origin/hex/files/dev-notes.json"
 export HEX_DEV_NOTES_PAGE="$origin/hex/dev"
 
 bundle="$("$root/scripts/build-app.sh")"
-"$root/scripts/validate-app.sh" "$bundle" Hex.app "$version" "$build_number" >/dev/null
+"$root/scripts/validate-app.sh" "$bundle" "$app_name.app" "$version" "$build_number" >/dev/null
 
 out_dir="$root/dist/team-release/$version"
 mkdir -p "$out_dir"
@@ -221,17 +223,17 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 requirement="$(sed "s/subject.OU] = \"5NZ4Q7NXJ4\"/subject.OU] = \"$HEX_TEAM_ID\"/" "$root/app/update-requirement.txt")"
 
 if [[ "$skip_notarize" -eq 0 ]]; then
-  "$root/scripts/notarize-app.sh" "$bundle" "$dmg" Hex
+  "$root/scripts/notarize-app.sh" "$bundle" "$dmg" "$app_name"
   /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$bundle" "$zip"
   codesign --verify --deep --strict -R="$requirement" "$bundle"
   spctl --assess --type execute --verbose=2 "$bundle"
 else
   mkdir "$work/staging"
-  /usr/bin/ditto "$bundle" "$work/staging/Hex.app"
+  /usr/bin/ditto "$bundle" "$work/staging/$app_name.app"
   ln -s /Applications "$work/staging/Applications"
   cp "$root/packaging/macos/dmg/background.tiff" "$work/staging/.background.tiff"
   cp "$root/packaging/macos/dmg/DS_Store" "$work/staging/.DS_Store"
-  hdiutil create -quiet -fs APFS -format ULFO -volname Hex -srcfolder "$work/staging" "$dmg"
+  hdiutil create -quiet -fs APFS -format ULFO -volname "$app_name" -srcfolder "$work/staging" "$dmg"
   codesign --force --timestamp --sign "$identity" "$dmg"
   /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$bundle" "$zip"
   dry_requirement="${requirement% and notarized}"

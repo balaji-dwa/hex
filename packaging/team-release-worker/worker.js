@@ -199,9 +199,9 @@ async function serveDevNotesHtml(bucket, request, url) {
 
   const html = `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Hex Releases</title></head>
+<head><meta charset="utf-8"><title>Slippy Hex Releases</title></head>
 <body>
-<h1>Hex Team Releases</h1>
+<h1>Slippy Hex Releases</h1>
 <p><a href="/download">Download latest macOS DMG</a></p>
 ${sections || "<p>No release notes published yet.</p>"}
 </body>

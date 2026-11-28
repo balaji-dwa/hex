@@ -158,7 +158,12 @@ pub fn stage(archive: &Path, version: &str) -> Result<Staged> {
         .ok_or_else(|| eyre!("Hex.app has no parent folder"))?;
     let staging = parent.join(format!("{PREFIX}{version}"));
     unpack(archive, &staging)?;
-    let update = staging.join("Hex.app");
+    let preferred = staging.join(format!("{}.app", crate::app_paths::app_name()));
+    let update = if preferred.is_dir() {
+        preferred
+    } else {
+        staging.join("Hex.app")
+    };
     let result = verify_bundle(&update, version, REQUIREMENT);
     if let Err(error) = result {
         let _ = fs::remove_dir_all(&staging);

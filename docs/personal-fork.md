@@ -162,6 +162,16 @@ current data separately first. Restoring an older snapshot loses changes
 since that snapshot. Neither the installer nor the routine deletes
 old apps or data.
 
+## Distribute Slippy Hex to the team
+
+See [release-hex](../.agents/skills/release-hex/SKILL.md) for the full
+upstream-sync, verification, notarization, publish, and rollback workflow.
+Runtime config (release origin, R2 bucket/endpoint, signing team, and
+`notarytool` keychain profile) lives outside git in
+`~/.config/hex/team-release.env`; run `scripts/team-release/release.sh` from a
+clean `dev` checkout to publish `Slippy Hex.app`, `Hex.dmg`, `Hex.zip`, and the
+updated schema-1 manifest, or `--rollback <archived-manifest.json>` to revert.
+
 ## Propose a feature upstream
 
 The maintainers [accept issues with patches, not outside PRs](../CONTRIBUTING.md).

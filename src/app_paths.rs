@@ -18,13 +18,12 @@ pub fn is_macos_test_build() -> bool {
     cfg!(target_os = "macos") && option_env!("HEX_TEST_BUILD") == Some("1")
 }
 
-/// The name menus show, so a test build running beside Hex reads as itself.
-#[cfg(target_os = "macos")]
+/// The name menus, window titles, and packaged macOS bundles show.
 pub fn app_name() -> &'static str {
     if is_macos_test_build() {
         "Hex Test"
     } else {
-        "Hex"
+        option_env!("HEX_BUILD_APP_NAME").unwrap_or("Hex")
     }
 }
 

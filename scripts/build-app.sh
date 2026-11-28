@@ -25,7 +25,7 @@ elif [ "${HEX_TEST_BUILD:-}" = 1 ]; then
 else
   team_id=${HEX_TEAM_ID:?Set HEX_TEAM_ID to the Apple Developer signing team}
   identity=$(hex_codesign_identity "$team_id")
-  app_name=Hex
+  app_name=${HEX_APP_NAME:-Hex}
   bundle_id=anomaly.hex
 fi
 # Every build carries the `capture` experiment (dormant until enabled), with
@@ -59,7 +59,7 @@ if [ "${HEX_LOCAL_BUILD:-}" = 1 ]; then
 elif [ -z "${HEX_COMMIT:-}" ] && [ "${HEX_TEST_BUILD:-}" = 1 ]; then
   HEX_COMMIT=$(git -C "$root" rev-parse --short=7 HEAD 2>/dev/null || true)
 fi
-for name in HEX_LOCAL_BUILD HEX_TEST_BUILD HEX_COMMIT HEX_BUILD_CHANNEL HEX_VERSION HEX_UPDATE_TEAM_ID HEX_RELEASE_ORIGIN HEX_RELEASE_DOWNLOAD_URL HEX_DEV_NOTES_URL HEX_DEV_NOTES_PAGE; do
+for name in HEX_LOCAL_BUILD HEX_TEST_BUILD HEX_COMMIT HEX_BUILD_CHANNEL HEX_VERSION HEX_APP_NAME HEX_UPDATE_TEAM_ID HEX_RELEASE_ORIGIN HEX_RELEASE_DOWNLOAD_URL HEX_DEV_NOTES_URL HEX_DEV_NOTES_PAGE; do
   value=${!name:-}
   if [ -n "$value" ]; then
     case "$value" in
