@@ -398,27 +398,32 @@ fn rejected_requests_map_to_their_errors_without_bad_paths() {
     assert!(!valid_ts("1700000000.00001"));
 }
 
-/// The list the mock serves: since 0, the whole history and its cursor;
-/// after that, what changed since.
+/// The initial window and ascending delta pages match listHexThreads.
 #[derive(Default)]
 struct History {
     tasks: Vec<Value>,
 }
 
 impl History {
-    fn list(&self, since: u64) -> Value {
+    fn list(&self, request: &Request) -> Value {
+        let since: u64 = request.query["since"].parse().unwrap();
+        let limit: usize = request.query["limit"].parse().unwrap();
         let seq = |task: &Value| task["seq"].as_u64().unwrap();
+        let mut tasks: Vec<_> = self.tasks.iter().filter(|task| seq(task) > since).collect();
         if since == 0 {
-            let cursor = self.tasks.iter().map(seq).max().unwrap_or(0);
-            json!({"cursor": cursor, "tasks": self.tasks})
+            let cursor = tasks.iter().map(|task| seq(task)).max().unwrap_or(0);
+            tasks.sort_by(|left, right| {
+                right["updatedAt"]
+                    .as_u64()
+                    .cmp(&left["updatedAt"].as_u64())
+                    .then_with(|| right["ts"].as_str().cmp(&left["ts"].as_str()))
+            });
+            tasks.truncate(limit);
+            json!({"cursor": cursor, "tasks": tasks})
         } else {
-            let tasks: Vec<_> = self
-                .tasks
-                .iter()
-                .filter(|task| seq(task) > since)
-                .cloned()
-                .collect();
-            let cursor = tasks.iter().map(seq).max().unwrap_or(since);
+            tasks.sort_by_key(|task| seq(task));
+            tasks.truncate(limit);
+            let cursor = tasks.last().map_or(since, |task| seq(task));
             json!({"cursor": cursor, "tasks": tasks})
         }
     }
@@ -428,7 +433,7 @@ fn history_server(history: Arc<Mutex<History>>) -> Mock {
     Mock::start(move |request| {
         let history = history.lock().unwrap();
         match (request.method.as_str(), request.path.as_str()) {
-            ("GET", "/api/hex/tasks") => ok(history.list(request.query["since"].parse().unwrap())),
+            ("GET", "/api/hex/tasks") => ok(history.list(request)),
             ("GET", path) => {
                 let ts = path.trim_start_matches("/api/hex/tasks/");
                 let task = history.tasks.iter().find(|task| task["ts"] == ts).unwrap();
@@ -482,6 +487,7 @@ fn the_cursor_is_seeded_privately_and_each_completion_notifies_once() {
         assert_eq!(mode & 0o777, 0o600);
     }
     assert!(posted(old).is_empty());
+    assert!(worker.handle.snapshot().unread.is_empty());
 
     history.lock().unwrap().tasks.push(task(new, "running", 6));
     worker.handle.refresh();
@@ -531,6 +537,101 @@ fn the_cursor_is_seeded_privately_and_each_completion_notifies_once() {
     assert_eq!(posted(new).len(), 1);
     assert!(posted(old).is_empty());
     worker.stop_and_join();
+}
+
+#[test]
+fn restarting_from_saved_zero_notifies_the_completion_and_advances_the_cursor() {
+    let dir = TempDir::new();
+    let ts = "991795815790.000001";
+    let history = Arc::new(Mutex::new(History::default()));
+    let server = history_server(history.clone());
+    let auth = server.client(&dir.0);
+    let cursor = auth.cursor_path(MEMBER);
+    let worker = Worker::start(auth, MEMBER, false, Arc::new(|| {})).unwrap();
+    wait_until("initial empty history saves zero", || {
+        std::fs::read_to_string(&cursor).is_ok_and(|seq| seq == "0")
+    });
+    // In a test, stopping the worker signs out. Restore the persisted cursor
+    // to simulate quitting Hex and restarting it after a task has completed.
+    let saved = std::fs::read_to_string(&cursor).unwrap();
+    worker.stop_and_join();
+    std::fs::write(&cursor, saved).unwrap();
+    history.lock().unwrap().tasks.push(task(ts, "done", 2));
+
+    let worker = Worker::start(server.client(&dir.0), MEMBER, false, Arc::new(|| {})).unwrap();
+    wait_until("the cursor advances past zero", || {
+        std::fs::read_to_string(&cursor).is_ok_and(|seq| seq == "2")
+    });
+    assert!(worker.handle.snapshot().unread.contains(ts));
+    assert_eq!(
+        posted(ts),
+        [(format!("hex.slippy.{ts}.2"), "Drafted the reply.".into())]
+    );
+    worker.stop_and_join();
+}
+
+#[test]
+fn restarting_from_zero_pages_past_the_recent_snapshot() {
+    let dir = TempDir::new();
+    let old = "991795815792.000002";
+    let mut tasks = vec![
+        task("991795815792.000001", "queued", 1),
+        task(old, "done", 2),
+    ];
+    tasks.extend((3..=102).map(|seq| task(&format!("991795815792.{seq:06}"), "done", seq)));
+    let history = Arc::new(Mutex::new(History { tasks }));
+    let server = history_server(history);
+    let auth = server.client(&dir.0);
+    let cursor = auth.cursor_path(MEMBER);
+    std::fs::write(&cursor, "0").unwrap();
+
+    let worker = Worker::start(auth, MEMBER, false, Arc::new(|| {})).unwrap();
+    wait_until("the cursor passes the initial limit", || {
+        std::fs::read_to_string(&cursor).is_ok_and(|seq| seq == "102")
+    });
+    assert!(worker.handle.snapshot().unread.contains(old));
+    assert_eq!(
+        posted(old),
+        [(format!("hex.slippy.{old}.2"), "Drafted the reply.".into())]
+    );
+    let requests = server.requests();
+    let cursors = requests
+        .iter()
+        .filter_map(|request| request.query.get("since").map(String::as_str))
+        .collect::<Vec<_>>();
+    assert!(cursors.starts_with(&["0", "1", "101"]));
+    worker.stop_and_join();
+}
+
+#[test]
+fn a_connection_failure_keeps_the_workers_cursor_and_cache() {
+    let dir = TempDir::new();
+    let history = Arc::new(Mutex::new(History {
+        tasks: vec![task("991795815793.000001", "done", 3)],
+    }));
+    let server = history_server(history);
+    let auth = server.client(&dir.0);
+    let cursor = auth.cursor_path(MEMBER);
+    let cache = auth.cache_dir(MEMBER);
+    let kept = cache.join("kept");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::write(&kept, "saved").unwrap();
+
+    let worker = Worker::start(auth, MEMBER, false, Arc::new(|| {})).unwrap();
+    wait_until("the worker loads history", || {
+        worker.handle.snapshot().tasks.len() == 1
+    });
+    drop(server);
+    worker.handle.refresh();
+    wait_until("the network error", || {
+        worker.handle.snapshot().error == Some(Error::Auth(AuthError::Service))
+    });
+    assert!(!worker.handle.snapshot().needs_reauth);
+    assert_eq!(std::fs::read_to_string(&cursor).unwrap(), "3");
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "saved");
+    worker.stop_and_join();
+    assert!(!cursor.exists());
+    assert!(!cache.exists());
 }
 
 #[test]
@@ -691,7 +792,7 @@ fn threads_server(threads: Arc<Mutex<Threads>>) -> Mock {
             ("GET", [""]) => ok(History {
                 tasks: threads.tasks.clone(),
             }
-            .list(request.query["since"].parse().unwrap())),
+            .list(request)),
             ("GET", ["", ts]) => {
                 let task = threads.tasks.iter().find(|task| task["ts"] == *ts).unwrap();
                 ok(json!({

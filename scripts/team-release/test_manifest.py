@@ -84,6 +84,7 @@ class ManifestTests(unittest.TestCase):
         )
         rolled = manifest.rollback_manifest(
             archived=archived,
+            channel="dev",
             sequence=5,
             published_at="2026-11-28T01:00:00Z",
         )
@@ -150,6 +151,10 @@ class ManifestTests(unittest.TestCase):
         current = self.root / "dev.json"
         current.write_text(json.dumps({"sequence": 12}), encoding="utf-8")
         self.assertEqual(manifest.next_sequence(current), 13)
+
+        current.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Invalid sequence"):
+            manifest.next_sequence(current)
 
 
 if __name__ == "__main__":

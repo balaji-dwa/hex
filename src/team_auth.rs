@@ -37,6 +37,29 @@ pub(crate) enum AuthState {
     },
 }
 
+impl AuthState {
+    pub(crate) fn reauth(&self, error: AuthError) -> Option<Self> {
+        if !error.requires_reauth() {
+            return None;
+        }
+        let last_email = match self {
+            Self::SignedIn { email, .. } => Some(email.clone()),
+            Self::NeedsReauth { last_email, .. } => last_email.clone(),
+            _ => None,
+        };
+        Some(Self::NeedsReauth {
+            last_email,
+            reason: error.message().into(),
+        })
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum RefreshOutcome {
+    Complete(AuthState),
+    Retry(AuthState),
+}
+
 /// User-facing errors deliberately omit request URLs, server bodies and headers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AuthError {
@@ -53,6 +76,10 @@ pub(crate) enum AuthError {
 }
 
 impl AuthError {
+    pub(crate) const fn requires_reauth(self) -> bool {
+        matches!(self, Self::Denied | Self::Verification | Self::Refresh)
+    }
+
     pub(crate) const fn message(self) -> &'static str {
         match self {
             Self::Cancelled => "Sign-in canceled.",
@@ -126,19 +153,25 @@ impl Client {
         Ok(signed_in(session))
     }
 
-    pub(crate) fn refresh_if_needed(&self, cancelled: &AtomicBool) -> Result<AuthState, AuthError> {
+    pub(crate) fn refresh_if_needed(
+        &self,
+        cancelled: &AtomicBool,
+    ) -> Result<RefreshOutcome, AuthError> {
         check_cancelled(cancelled)?;
         let Some(mut session) = self.load()? else {
-            return Ok(AuthState::SignedOut);
+            return Ok(RefreshOutcome::Complete(AuthState::SignedOut));
         };
-        let last_email = Some(session.email.clone());
-        Ok(match self.whoami(&mut session, cancelled) {
-            Ok(()) => signed_in(session),
-            Err(error) => AuthState::NeedsReauth {
-                last_email,
-                reason: error.message().into(),
-            },
-        })
+        let result = self.whoami(&mut session, cancelled);
+        check_cancelled(cancelled)?;
+        let state = signed_in(session);
+        match result {
+            Ok(()) => Ok(RefreshOutcome::Complete(state)),
+            Err(AuthError::Service) => Ok(RefreshOutcome::Retry(state)),
+            Err(error) => state
+                .reauth(error)
+                .map(RefreshOutcome::Complete)
+                .ok_or(error),
+        }
     }
 
     fn whoami(&self, session: &mut StoredSession, cancelled: &AtomicBool) -> Result<(), AuthError> {

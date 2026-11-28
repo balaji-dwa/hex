@@ -31,7 +31,7 @@ Usage: scripts/team-release/release.sh [options]
   --skip-notarize          Skip Apple notarization (only valid with --dry-run)
   --allow-dirty            Allow uncommitted changes (only valid with --dry-run)
   --skip-checks            Skip pre-build unit/identity tests (only valid with --dry-run)
-  --channel <dev|stable>   Release channel (default: dev)
+  --channel <dev|stable|beta>  Release channel (default: dev)
   --version <ver>          Override release version (default: 0.0.0-dev-<unix-ts>)
   --rollback <manifest>    Repoint the live channel manifest to an archived release
 EOF
@@ -56,6 +56,10 @@ case "$channel" in
   dev|stable|beta) ;;
   *) echo "Unsupported channel: $channel" >&2; exit 1 ;;
 esac
+download_path="/download"
+if [[ "$channel" != dev ]]; then
+  download_path="/download/$channel"
+fi
 
 if [[ "$dry_run" -eq 0 && ( "$skip_notarize" -eq 1 || "$allow_dirty" -eq 1 || "$skip_checks" -eq 1 ) ]]; then
   echo "--skip-notarize, --allow-dirty, and --skip-checks are only permitted with --dry-run." >&2
@@ -95,17 +99,60 @@ curl_release() {
       -H "CF-Access-Client-Secret: $HEX_RELEASE_CF_ACCESS_CLIENT_SECRET"
     )
   fi
-  curl ${headers[@]+"${headers[@]}"} "$@"
+  # Ignore .curlrc, which can enable redirects for requests carrying Access headers.
+  curl -q ${headers[@]+"${headers[@]}"} "$@"
 }
 
 fetch_live_json() {
   local url=$1
   local dest=$2
-  if curl_release -fsSL --max-time 15 "$url" -o "$dest" 2>/dev/null; then
-    return 0
+  local response
+  if ! response="$(curl_release -sS --max-time 15 --write-out '%{http_code} %{redirect_url}' -o "$dest.tmp" "$url")"; then
+    echo "Could not fetch $url (curl request failed)." >&2
+    return 1
   fi
-  rm -f "$dest"
-  return 1
+  local status=${response%% *}
+  case "$status" in
+    200)
+      if ! python3 -c 'import json, sys; sys.exit(not isinstance(json.load(sys.stdin), dict))' < "$dest.tmp" 2>/dev/null; then
+        echo "Expected a JSON object from $url (HTTP 200)." >&2
+        return 1
+      fi
+      mv "$dest.tmp" "$dest" || return 1
+      ;;
+    404)
+      rm -f "$dest" "$dest.tmp" || return 1
+      return 2
+      ;;
+    301|302|303|307|308)
+      local location=${response#* }
+      echo "Unexpected HTTP $status redirect from $url to ${location:-<no Location>}. Check the Cloudflare Access service token." >&2
+      return 1
+      ;;
+    *)
+      echo "Could not fetch $url (HTTP $status)." >&2
+      return 1
+      ;;
+  esac
+}
+
+fetch_optional_live_json() {
+  fetch_live_json "$@" || { [[ $? -eq 2 ]] || return 1; }
+}
+
+verify_live_manifest() {
+  local dest=$1
+  local expected_version=$2
+  local live_version
+  if ! fetch_live_json "$origin/hex/desktop/$channel.json" "$dest"; then
+    echo "Could not verify the live $channel manifest after upload." >&2
+    return 1
+  fi
+  live_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["version"])' "$dest")"
+  if [[ "$live_version" != "$expected_version" ]]; then
+    echo "Live manifest mismatch: expected $expected_version, got $live_version" >&2
+    return 1
+  fi
 }
 
 upload_immutable_if_missing() {
@@ -130,7 +177,7 @@ verify_remote_artifact() {
   local headers
   headers="$(curl_release -fsSI --max-time 30 "$url")"
   local remote_size
-  remote_size="$(printf '%s\n' "$headers" | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub(/\r/, "", $2); print $2; exit}')"
+  remote_size="$(printf '%s\n' "$headers" | awk 'tolower($1) == "content-length:" {gsub(/\r/, "", $2); print $2; exit}')"
   if [[ "$remote_size" != "$expected_size" ]]; then
     echo "Remote artifact size mismatch for $url: expected $expected_size, got ${remote_size:-none}" >&2
     exit 1
@@ -143,10 +190,10 @@ if [[ -n "$rollback_manifest" ]]; then
   trap 'rm -rf "$work"' EXIT HUP INT TERM
 
   live_manifest="$work/live.json"
-  fetch_live_json "$origin/hex/desktop/$channel.json" "$live_manifest" || true
-  next_seq="$(python3 "$manifest_py" next-sequence ${live_manifest:+--current "$live_manifest"})"
+  fetch_optional_live_json "$origin/hex/desktop/$channel.json" "$live_manifest"
+  next_seq="$(python3 "$manifest_py" next-sequence --current "$live_manifest")"
   rolled_manifest="$work/$channel.json"
-  python3 "$manifest_py" rollback --from "$rollback_manifest" --sequence "$next_seq" --out "$rolled_manifest"
+  python3 "$manifest_py" rollback --from "$rollback_manifest" --channel "$channel" --sequence "$next_seq" --out "$rolled_manifest"
 
   target_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["version"])' "$rolled_manifest")"
   zip_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["targets"]["macos-arm64"]["url"])' "$rolled_manifest")"
@@ -167,8 +214,7 @@ if [[ -n "$rollback_manifest" ]]; then
     --content-type "application/json; charset=utf-8" \
     --cache-control "no-cache" \
     --only-show-errors
-  live_version="$(curl_release -fsSL "$origin/hex/desktop/$channel.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"]["version"])')"
-  [[ "$live_version" == "$target_version" ]] || { echo "Rollback verification failed: live version is $live_version" >&2; exit 1; }
+  verify_live_manifest "$live_manifest" "$target_version"
   echo "Rolled back $channel channel to $target_version (sequence $next_seq)."
   exit 0
 fi
@@ -245,7 +291,7 @@ export HEX_BUILD_CHANNEL="$channel"
 export HEX_VERSION="$version"
 export HEX_BUILD_NUMBER="$build_number"
 export HEX_RELEASE_ORIGIN="$origin"
-export HEX_RELEASE_DOWNLOAD_URL="$origin/download"
+export HEX_RELEASE_DOWNLOAD_URL="$origin$download_path"
 export HEX_DEV_NOTES_URL="$origin/hex/files/dev-notes.json"
 export HEX_DEV_NOTES_PAGE="$origin/hex/dev"
 
@@ -286,10 +332,10 @@ fi
 
 live_manifest="$work/live-manifest.json"
 live_notes="$work/live-notes.json"
-fetch_live_json "$origin/hex/desktop/$channel.json" "$live_manifest" || true
-fetch_live_json "$origin/hex/files/dev-notes.json" "$live_notes" || true
+fetch_optional_live_json "$origin/hex/desktop/$channel.json" "$live_manifest"
+fetch_optional_live_json "$origin/hex/files/dev-notes.json" "$live_notes"
 
-next_seq="$(python3 "$manifest_py" next-sequence ${live_manifest:+--current "$live_manifest"})"
+next_seq="$(python3 "$manifest_py" next-sequence --current "$live_manifest")"
 manifest_out="$out_dir/$channel.json"
 python3 "$manifest_py" build \
   --channel "$channel" \
@@ -357,13 +403,12 @@ aws_r2 s3 cp "$manifest_out" "s3://$HEX_R2_BUCKET/hex/desktop/$channel.json" \
   --cache-control "no-cache" \
   --only-show-errors
 
-live_version="$(curl_release -fsSL "$origin/hex/desktop/$channel.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"]["version"])')"
-[[ "$live_version" == "$version" ]] || { echo "Live manifest mismatch: expected $version, got $live_version" >&2; exit 1; }
-download_location="$(curl_release -fsSI --max-time 15 "$origin/download" | awk 'BEGIN{IGNORECASE=1} /^location:/ {gsub(/\r/, "", $2); print $2; exit}')"
+verify_live_manifest "$live_manifest" "$version"
+download_location="$(curl_release -fsSI --max-time 15 "$origin$download_path" | awk 'tolower($1) == "location:" {gsub(/\r/, "", $2); print $2; exit}')"
 [[ "$download_location" == *"/hex/files/$dmg_sha/$dmg_name" ]] || {
   echo "Download redirect mismatch: got ${download_location:-none}" >&2
   exit 1
 }
 
-printf 'Published Hex %s (sequence %s) to %s\n  Download: %s/download\n  Rollback: scripts/team-release/release.sh --rollback %s\n' \
-  "$version" "$next_seq" "$origin" "$origin" "$history_dir/$version.json"
+printf 'Published Hex %s (sequence %s) to %s\n  Download: %s\n  Rollback: scripts/team-release/release.sh --channel %s --rollback %q\n' \
+  "$version" "$next_seq" "$origin" "$origin$download_path" "$channel" "$history_dir/$version.json"

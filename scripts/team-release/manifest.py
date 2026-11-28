@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generate, bump, and roll back schema-1 Hex release manifests and dev notes."""
 
+from __future__ import annotations
+
 import argparse
 import datetime as dt
 import hashlib
@@ -114,6 +116,7 @@ def build_manifest(
 def rollback_manifest(
     *,
     archived: dict,
+    channel: str,
     sequence: int,
     published_at: str | None = None,
 ) -> dict:
@@ -121,9 +124,11 @@ def rollback_manifest(
         raise ValueError("Archived manifest must be schema 1")
     if archived.get("app") != "hex" or archived.get("artifact") != "desktop":
         raise ValueError("Archived manifest is not a Hex desktop manifest")
-    channel = archived.get("channel")
-    if channel not in ALLOWED_CHANNELS:
-        raise ValueError(f"Archived manifest has invalid channel {channel!r}")
+    archived_channel = archived.get("channel")
+    if archived_channel not in ALLOWED_CHANNELS:
+        raise ValueError(f"Archived manifest has invalid channel {archived_channel!r}")
+    if archived_channel != channel:
+        raise ValueError(f"Cannot roll back the {channel} channel using a {archived_channel} archive")
     if sequence < 1:
         raise ValueError("sequence must be >= 1")
     release = archived.get("release")
@@ -189,8 +194,8 @@ def next_sequence(current_path: pathlib.Path | None) -> int:
     if current_path is None or not current_path.is_file():
         return 1
     data = json.loads(current_path.read_text(encoding="utf-8"))
-    seq = data.get("sequence", 0)
-    if not isinstance(seq, int) or seq < 0:
+    seq = data.get("sequence")
+    if type(seq) is not int or seq < 1:
         raise ValueError(f"Invalid sequence in {current_path}: {seq!r}")
     return seq + 1
 
@@ -222,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_rollback = sub.add_parser("rollback")
     p_rollback.add_argument("--from", dest="from_path", required=True, type=pathlib.Path)
+    p_rollback.add_argument("--channel", required=True, choices=ALLOWED_CHANNELS)
     p_rollback.add_argument("--sequence", required=True, type=int)
     p_rollback.add_argument("--out", required=True, type=pathlib.Path)
     p_rollback.add_argument("--published-at")
@@ -258,23 +264,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "rollback":
-        archived = json.loads(args.from_path.read_text(encoding="utf-8"))
-        manifest = rollback_manifest(
-            archived=archived,
-            sequence=args.sequence,
-            published_at=args.published_at,
-        )
+        try:
+            archived = json.loads(args.from_path.read_text(encoding="utf-8"))
+            manifest = rollback_manifest(
+                archived=archived,
+                channel=args.channel,
+                sequence=args.sequence,
+                published_at=args.published_at,
+            )
+        except ValueError as error:
+            p_rollback.error(str(error))
         write_json_atomic(args.out, manifest)
         return 0
 
     if args.cmd == "notes":
         titles = args.titles_file.read_text(encoding="utf-8").splitlines()
         existing = None
-        if args.existing and args.existing.is_file():
+        if args.existing:
             try:
                 existing = json.loads(args.existing.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                existing = None
+            except (OSError, ValueError) as error:
+                p_notes.error(f"Could not read existing notes: {error}")
+            if not isinstance(existing, dict) or not isinstance(existing.get("builds"), list):
+                p_notes.error(f"Expected a builds list in existing notes: {args.existing}")
         notes = update_dev_notes(
             version=args.version,
             commit=args.commit,
@@ -288,7 +300,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "next-sequence":
-        print(next_sequence(args.current))
+        try:
+            print(next_sequence(args.current))
+        except ValueError as error:
+            p_seq.error(str(error))
         return 0
 
     return 2

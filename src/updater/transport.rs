@@ -1,7 +1,6 @@
 //! HTTPS through `net` (the system's proxy and trusted roots): the polled
 //! manifest with `If-None-Match`, and resumable downloads checked against
-//! the manifest's size and SHA-256 before any byte is used. Requests carry
-//! nothing about the install beyond `User-Agent: hex/<channel>/<version>`.
+//! the manifest's size and SHA-256 before any byte is used.
 
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -9,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
+
+use crate::net::{self, ScopedHeaders};
 
 use super::protocol::Target;
 
@@ -22,21 +23,21 @@ pub fn user_agent(channel: &str, version: &str) -> String {
 
 const CF_ACCESS_CLIENT_ID: Option<&str> = option_env!("HEX_BUILD_CF_ACCESS_CLIENT_ID");
 const CF_ACCESS_CLIENT_SECRET: Option<&str> = option_env!("HEX_BUILD_CF_ACCESS_CLIENT_SECRET");
+const CF_ACCESS_HEADERS: &[(&str, &str)] = match (CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET) {
+    (Some(id), Some(secret)) => &[
+        ("CF-Access-Client-Id", id),
+        ("CF-Access-Client-Secret", secret),
+    ],
+    _ => &[],
+};
 
 /// Optional Cloudflare Access service-token headers, sent only to the compiled
-/// release host over HTTPS.
-fn access_headers(url: &str) -> Vec<(&'static str, &'static str)> {
-    let (Some(id), Some(secret)) = (CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET) else {
-        return Vec::new();
+/// HTTPS release origin.
+fn access_headers(url: &str) -> &'static [(&'static str, &'static str)] {
+    let Ok(url) = url::Url::parse(url) else {
+        return &[];
     };
-    if url.starts_with("https://") && crate::net::host(url) == crate::net::host(super::ORIGIN) {
-        vec![
-            ("CF-Access-Client-Id", id),
-            ("CF-Access-Client-Secret", secret),
-        ]
-    } else {
-        Vec::new()
-    }
+    ScopedHeaders::new(super::ORIGIN, CF_ACCESS_HEADERS).for_url(&url)
 }
 
 /// The last manifest the service sent, revalidated with its ETag.
@@ -64,23 +65,23 @@ impl ManifestCache {
                 ..Self::default()
             };
         }
-        let agent = crate::net::agent(url, |config| {
+        let agent = net::agent(url, |config| {
             config
                 .https_only(true)
-                .max_redirects(10)
                 .http_status_as_error(false)
                 .timeout_global(Some(max_time.max(Duration::from_secs(1))))
         });
-        let mut request = agent.get(url).header("User-Agent", user_agent);
-        for (name, value) in access_headers(url) {
-            request = request.header(name, value);
-        }
+        let mut public_headers = vec![("User-Agent", user_agent)];
         if let (Some(etag), Some(_)) = (&self.etag, &self.body) {
-            request = request.header("If-None-Match", etag.as_str());
+            public_headers.push(("If-None-Match", etag.as_str()));
         }
-        let mut response = request
-            .call()
-            .map_err(|error| eyre!("{}", crate::net::unreachable(url, &error)))?;
+        let (_, mut response) = net::get_following_redirects(
+            &agent,
+            url,
+            &public_headers,
+            ScopedHeaders::new(url, access_headers(url)),
+        )
+        .map_err(|error| eyre!("{}", net::unreachable(url, &error)))?;
         match response.status().as_u16() {
             304 => self
                 .body
@@ -147,12 +148,11 @@ pub fn download(url: &str, user_agent: &str, target: &Target, directory: &Path) 
     drop(options.open(&partial)?);
     let complete = fs::metadata(&partial)?.len() == target.size;
     if !complete {
-        let headers = access_headers(url);
-        crate::net::download(
-            &crate::net::Download {
+        net::download(
+            &net::Download {
                 url,
                 user_agent,
-                headers: &headers,
+                headers: access_headers(url),
                 size: Some(target.size),
                 canceled: None,
             },

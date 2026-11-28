@@ -127,18 +127,18 @@ fn managed_oauth_sign_in_refresh_reauth_and_sign_out() {
     assert!(stored.access_token == "first-access");
 
     // Verify the persisted session's identity even when the token isn't due.
-    assert_member(client.refresh_if_needed(&cancel).unwrap());
+    assert_verified(client.refresh_if_needed(&cancel).unwrap());
 
     // A fresh-looking access token rejected by whoami also refreshes.
     server.state.lock().unwrap().reject_access = true;
-    assert_member(client.refresh_if_needed(&cancel).unwrap());
+    assert_verified(client.refresh_if_needed(&cancel).unwrap());
     let stored = client.load().unwrap().unwrap();
     assert!(stored.access_token == "access-1");
     assert!(stored.refresh_token.as_deref() == Some("refresh-1"));
 
     // A Cloudflare Access login redirect on an expired bearer also refreshes.
     server.state.lock().unwrap().redirect_access_login = true;
-    assert_member(client.refresh_if_needed(&cancel).unwrap());
+    assert_verified(client.refresh_if_needed(&cancel).unwrap());
     let mut stored = client.load().unwrap().unwrap();
     assert!(stored.access_token == "access-2");
     assert!(stored.refresh_token.as_deref() == Some("refresh-2"));
@@ -147,7 +147,7 @@ fn managed_oauth_sign_in_refresh_reauth_and_sign_out() {
     stored.access_expires_at_ms = Some(now_ms() + 20_000);
     session::save(&client.store, &stored).unwrap();
     let verification_count = server.state.lock().unwrap().verifications;
-    assert_member(client.refresh_if_needed(&cancel).unwrap());
+    assert_verified(client.refresh_if_needed(&cancel).unwrap());
     assert_eq!(
         server.state.lock().unwrap().verifications,
         verification_count + 1
@@ -159,17 +159,64 @@ fn managed_oauth_sign_in_refresh_reauth_and_sign_out() {
     server.state.lock().unwrap().revoke_refresh = true;
     assert_eq!(
         client.refresh_if_needed(&cancel).unwrap(),
-        AuthState::NeedsReauth {
+        RefreshOutcome::Complete(AuthState::NeedsReauth {
             last_email: Some("nick@dwa1.com".into()),
             reason: AuthError::Refresh.message().into(),
-        }
+        })
     );
     assert_eq!(client.sign_out().unwrap(), AuthState::SignedOut);
     assert!(!client.store.exists());
     assert_eq!(
         client.refresh_if_needed(&cancel).unwrap(),
-        AuthState::SignedOut
+        RefreshOutcome::Complete(AuthState::SignedOut)
     );
+}
+
+#[test]
+fn an_offline_refresh_keeps_the_saved_member_and_recovers() {
+    let fixture = TempDir::new();
+    let server = Mock::start();
+    let client = Client::new(fixture.0.join("session.json"), &server.origin, None).unwrap();
+    let cancel = AtomicBool::new(false);
+    let (open, page) = browser();
+    let signed_in = client.sign_in(&cancel, open).unwrap();
+    assert_eq!(page.recv_timeout(Duration::from_secs(5)).unwrap().0, 200);
+    let saved = fs::read(&client.store).unwrap();
+
+    server.state.lock().unwrap().close_whoami = true;
+    assert_eq!(
+        client.refresh_if_needed(&cancel),
+        Ok(RefreshOutcome::Retry(signed_in))
+    );
+    assert!(fs::read(&client.store).unwrap() == saved);
+
+    server.state.lock().unwrap().close_whoami = false;
+    assert_verified(client.refresh_if_needed(&cancel).unwrap());
+}
+
+#[test]
+fn whoami_identity_mismatch_requires_reauth_unless_the_check_was_cancelled() {
+    let fixture = TempDir::new();
+    let server = Mock::start();
+    let client = Client::new(fixture.0.join("session.json"), &server.origin, None).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (open, page) = browser();
+    client.sign_in(&cancel, open).unwrap();
+    assert_eq!(page.recv_timeout(Duration::from_secs(5)).unwrap().0, 200);
+
+    server.state.lock().unwrap().wrong_member = true;
+    assert_eq!(
+        client.refresh_if_needed(&cancel),
+        Ok(RefreshOutcome::Complete(AuthState::NeedsReauth {
+            last_email: Some("nick@dwa1.com".into()),
+            reason: AuthError::Verification.message().into(),
+        }))
+    );
+
+    // Cancel while the request is in flight, before the invalid reply arrives.
+    server.state.lock().unwrap().cancel_on_whoami = Some(cancel.clone());
+    assert_eq!(client.refresh_if_needed(&cancel), Err(AuthError::Cancelled));
+    assert!(cancel.load(Ordering::Acquire));
 }
 
 #[test]
@@ -343,6 +390,13 @@ fn a_bearer_still_rejected_after_refresh_needs_sign_in() {
     assert_eq!(server.state.lock().unwrap().tasks.len(), 2);
 }
 
+fn assert_verified(outcome: RefreshOutcome) {
+    let RefreshOutcome::Complete(state) = outcome else {
+        panic!("expected verification to complete");
+    };
+    assert_member(state);
+}
+
 fn assert_member(state: AuthState) {
     assert!(matches!(
         state,
@@ -418,6 +472,9 @@ struct MockState {
     redirect_access_login: bool,
     revoke_refresh: bool,
     wrong_state: bool,
+    wrong_member: bool,
+    close_whoami: bool,
+    cancel_on_whoami: Option<Arc<AtomicBool>>,
     registrations: usize,
     resource_discoveries: usize,
     code_exchanges: usize,
@@ -444,6 +501,9 @@ impl Mock {
             redirect_access_login: false,
             revoke_refresh: false,
             wrong_state: false,
+            wrong_member: false,
+            close_whoami: false,
+            cancel_on_whoami: None,
             registrations: 0,
             resource_discoveries: 0,
             code_exchanges: 0,
@@ -533,6 +593,12 @@ impl MockState {
                     };
                     return respond(stream, "401 Unauthorized", headers, &json!({}));
                 };
+                if self.close_whoami {
+                    return;
+                }
+                if let Some(cancel) = self.cancel_on_whoami.take() {
+                    cancel.store(true, Ordering::Release);
+                }
                 self.verifications += 1;
                 let expected = if self.refreshes == 0 {
                     "Bearer first-access".into()
@@ -553,11 +619,16 @@ impl MockState {
                 if self.reject_access || token != &expected {
                     return respond(stream, "401 Unauthorized", &[], &json!({}));
                 }
+                let sub = if self.wrong_member {
+                    "another-member"
+                } else {
+                    "member-id"
+                };
                 respond(
                     stream,
                     "200 OK",
                     &[],
-                    &json!({"principal": "member", "sub": "member-id", "email": "nick@dwa1.com"}),
+                    &json!({"principal": "member", "sub": sub, "email": "nick@dwa1.com"}),
                 );
             }
             (

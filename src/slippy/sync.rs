@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::cache::DiskCache;
-use super::client::{Attachment, Client, Detail, Error, Origin, Role, Task};
+use super::client::{Attachment, Client, Detail, Error, Listed, Origin, Role, Task};
 use crate::team_auth::{AuthError, Client as AuthClient};
 
 const LIMIT: u8 = 100;
@@ -656,7 +656,7 @@ fn finish(shared: &Shared, result: Result<Task, Error>, answer: Answer) {
 fn report(shared: &Shared, error: Error) {
     shared.update(|state| {
         state.error = Some(error);
-        state.needs_reauth |= error == Error::Auth(AuthError::Refresh);
+        state.needs_reauth |= matches!(error, Error::Auth(auth) if auth.requires_reauth());
     });
 }
 
@@ -889,22 +889,34 @@ fn upsert(state: &mut State, task: Task) {
     }
 }
 
-struct Cursor {
-    last_notified_seq: Option<u64>,
-    loaded: bool,
-    /// The finished task whose detail lagged the list, and how many polls.
-    lagging: Option<(u64, u8)>,
+enum Cursor {
+    Unseeded,
+    Saved(Progress),
+    Steady(Progress),
 }
 
 impl Cursor {
     fn load(path: &Path) -> Self {
-        Self {
-            last_notified_seq: std::fs::read_to_string(path)
-                .ok()
-                .and_then(|value| value.trim().parse().ok()),
-            loaded: false,
-            lagging: None,
+        match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+        {
+            Some(seq) => Self::Saved(Progress::new(seq)),
+            None => Self::Unseeded,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Progress {
+    seq: u64,
+    /// The finished task whose detail lagged the list, and how many polls.
+    lagging: Option<(u64, u8)>,
+}
+
+impl Progress {
+    fn new(seq: u64) -> Self {
+        Self { seq, lagging: None }
     }
 
     /// Whether to wait another poll for `seq`'s detail to catch up.
@@ -917,12 +929,11 @@ impl Cursor {
         tries <= LAG_RETRIES
     }
 
-    fn save(&mut self, path: &Path, seq: u64) -> bool {
-        if crate::durable::write_private(path, seq.to_string().as_bytes()).is_err() {
-            return false;
-        }
-        self.last_notified_seq = Some(seq);
-        true
+    fn save(&mut self, path: &Path, seq: u64) -> Result<(), Error> {
+        crate::durable::write_private(path, seq.to_string().as_bytes())
+            .map_err(|_| Error::Unavailable)?;
+        self.seq = seq;
+        Ok(())
     }
 }
 
@@ -936,62 +947,86 @@ fn poll(shared: &Shared, client: &Client, path: &Path, cursor: &mut Cursor) {
 }
 
 fn sync(shared: &Shared, client: &Client, path: &Path, cursor: &mut Cursor) -> Result<(), Error> {
-    if !cursor.loaded {
-        let full = client.list(0, LIMIT)?;
-        if cursor.last_notified_seq.is_none() {
-            cursor.save(path, full.cursor);
+    let progress = match cursor {
+        Cursor::Unseeded => {
+            let full = client.list(0, LIMIT)?;
+            let mut progress = Progress::new(full.cursor);
+            progress.save(path, full.cursor)?;
+            load_history(shared, full.tasks);
+            progress
         }
-        // A saved cursor may have unseen completions. Apply the delta first
-        // so the initial history load doesn't swallow their status changes.
-        if cursor.last_notified_seq == Some(0) || cursor.last_notified_seq == Some(full.cursor) {
-            shared.update(|state| {
-                for task in full.tasks {
-                    upsert(state, task);
-                }
-                state.error = None;
-            });
-            cursor.loaded = true;
-            return Ok(());
-        }
-        if cursor.last_notified_seq.is_none() {
-            return Err(Error::Unavailable);
-        }
-        delta(shared, client, path, cursor)?;
-        // What the delta left for a later poll stays out, or that poll
-        // would see no change to notify.
-        let seen = cursor.last_notified_seq.unwrap_or(0);
-        shared.update(|state| {
-            for task in full.tasks.into_iter().filter(|task| task.seq <= seen) {
-                upsert(state, task);
+        Cursor::Saved(progress) => {
+            let full = client.list(0, LIMIT)?;
+            if progress.seq == full.cursor {
+                load_history(shared, full.tasks);
+            } else if progress.seq == 0 {
+                delta(shared, client, path, progress, Some(full))?;
+            } else {
+                delta(shared, client, path, progress, None)?;
+                // Leave changes deferred by delta out of the initial history.
+                let seen = progress.seq;
+                load_history(
+                    shared,
+                    full.tasks.into_iter().filter(|task| task.seq <= seen),
+                );
             }
-        });
-        cursor.loaded = true;
-        return Ok(());
-    }
-    delta(shared, client, path, cursor)
+            *progress
+        }
+        Cursor::Steady(progress) => return delta(shared, client, path, progress, None),
+    };
+    *cursor = Cursor::Steady(progress);
+    Ok(())
 }
 
-fn delta(shared: &Shared, client: &Client, path: &Path, cursor: &mut Cursor) -> Result<(), Error> {
+fn load_history(shared: &Shared, tasks: impl IntoIterator<Item = Task>) {
+    shared.update(|state| {
+        for task in tasks {
+            upsert(state, task);
+        }
+        state.error = None;
+    });
+}
+
+fn delta(
+    shared: &Shared,
+    client: &Client,
+    path: &Path,
+    progress: &mut Progress,
+    mut snapshot: Option<Listed>,
+) -> Result<(), Error> {
     loop {
-        let since = cursor.last_notified_seq.unwrap_or(0);
-        let mut page = client.list(since, LIMIT)?;
+        let mut since = progress.seq;
+        let mut page = match snapshot.take() {
+            Some(page) => page,
+            None => client.list(since, LIMIT)?,
+        };
+        if since == 0 && page.tasks.len() == usize::from(LIMIT) {
+            // Since zero serves a capped snapshot. Sequence 1 can only be
+            // the first queued task, so start the paginated scan after it.
+            since = 1;
+            let first_task = page.tasks.into_iter().find(|task| task.seq == since);
+            page = client.list(since, LIMIT)?;
+            if let Some(task) = first_task {
+                shared.update(|state| upsert(state, task));
+            }
+        }
         let more = since > 0 && page.tasks.len() == usize::from(LIMIT) && page.cursor > since;
         page.tasks.sort_by_key(|task| task.seq);
         for task in page.tasks {
             let finished = task.seq > since && !task.status.active();
-            if finished && settle(shared, client, cursor, &task)? == Settled::Lagging {
+            if finished && settle(shared, client, progress, &task)? == Settled::Lagging {
                 // Neither the task nor the cursor moves: the next poll
                 // sees the same change again.
                 return Ok(());
             }
             let seq = task.seq;
             shared.update(|state| upsert(state, task));
-            if finished && !cursor.save(path, seq) {
-                return Err(Error::Unavailable);
+            if finished {
+                progress.save(path, seq)?;
             }
         }
-        if page.cursor > cursor.last_notified_seq.unwrap_or(0) && !cursor.save(path, page.cursor) {
-            return Err(Error::Unavailable);
+        if page.cursor > progress.seq {
+            progress.save(path, page.cursor)?;
         }
         shared.update(|state| state.error = None);
         if !more {
@@ -1013,7 +1048,7 @@ enum Settled {
 fn settle(
     shared: &Shared,
     client: &Client,
-    cursor: &mut Cursor,
+    progress: &mut Progress,
     task: &Task,
 ) -> Result<Settled, Error> {
     let previous = shared.state.lock().unwrap().tasks.get(&task.ts).cloned();
@@ -1031,7 +1066,7 @@ fn settle(
     if shared.cancelled.load(Ordering::Acquire) {
         return Err(Error::Unavailable);
     }
-    if detail.task.seq < task.seq && cursor.wait_for(task.seq) {
+    if detail.task.seq < task.seq && progress.wait_for(task.seq) {
         return Ok(Settled::Lagging);
     }
     if detail.task.seq > task.seq && detail.task.status != task.status {
@@ -1087,7 +1122,7 @@ fn settle(
         );
         super::notify::post(&task.ts, task.seq, "Slippy", &body);
     }
-    cursor.lagging = None;
+    progress.lagging = None;
     Ok(Settled::Handled)
 }
 

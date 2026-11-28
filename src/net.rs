@@ -12,13 +12,90 @@
 
 mod download;
 mod proxy;
+#[cfg(test)]
+mod redirect_tests;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use ureq::http::{Response, header::LOCATION};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+use url::{Origin, Url};
 
 pub use download::{Download, download};
 pub use proxy::proxy_for;
+
+const MAX_REDIRECTS: usize = 10;
+
+/// Request headers that may only be sent to one HTTPS origin.
+pub(crate) struct ScopedHeaders<'a> {
+    origin: Option<Origin>,
+    headers: &'a [(&'a str, &'a str)],
+}
+
+impl<'a> ScopedHeaders<'a> {
+    pub(crate) fn new(url: &str, headers: &'a [(&'a str, &'a str)]) -> Self {
+        Self {
+            origin: Url::parse(url)
+                .ok()
+                .filter(|url| url.scheme() == "https")
+                .map(|url| url.origin()),
+            headers,
+        }
+    }
+
+    pub(crate) fn for_url(&self, url: &Url) -> &'a [(&'a str, &'a str)] {
+        if url.scheme() == "https" && self.origin.as_ref() == Some(&url.origin()) {
+            self.headers
+        } else {
+            &[]
+        }
+    }
+}
+
+/// Follow redirects with a fresh GET at each hop. Only public headers may
+/// travel to every destination. The agent's global timeout covers the chain.
+pub(crate) fn get_following_redirects(
+    agent: &ureq::Agent,
+    url: &str,
+    public_headers: &[(&str, &str)],
+    scoped_headers: ScopedHeaders<'_>,
+) -> Result<(Url, Response<ureq::Body>), ureq::Error> {
+    let started = Instant::now();
+    let mut url = Url::parse(url).map_err(|_| ureq::Error::BadUri("invalid URL".into()))?;
+    let timeout = agent.config().timeouts().global;
+    for hop in 0..=MAX_REDIRECTS {
+        let remaining = timeout.map(|timeout| timeout.saturating_sub(started.elapsed()));
+        if remaining == Some(Duration::ZERO) {
+            return Err(ureq::Error::Timeout(ureq::Timeout::Global));
+        }
+        let mut request = agent
+            .get(url.as_str())
+            .config()
+            .max_redirects(0)
+            .timeout_global(remaining)
+            .build();
+        for &(name, value) in public_headers.iter().chain(scoped_headers.for_url(&url)) {
+            request = request.header(name, value);
+        }
+        let response = request.call()?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok((url, response));
+        }
+        if hop == MAX_REDIRECTS {
+            break;
+        }
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .filter(|location| !location.is_empty())
+            .ok_or(ureq::Error::RedirectFailed)?;
+        url = url
+            .join(location)
+            .map_err(|_| ureq::Error::RedirectFailed)?;
+    }
+    Err(ureq::Error::TooManyRedirects)
+}
 
 /// What a caller adds to [`agent`]'s settings.
 pub type Config = ureq::config::ConfigBuilder<ureq::typestate::AgentScope>;
@@ -96,6 +173,7 @@ pub fn reason(error: &ureq::Error) -> String {
         ureq::Error::ConnectProxyFailed(detail) => format!("the proxy refused ({detail})"),
         ureq::Error::Tls(detail) => tls(detail),
         ureq::Error::NativeTls(detail) => tls(detail),
+        ureq::Error::RequireHttpsOnly(_) => "the request requires HTTPS".into(),
         // SChannel, Security.framework, and OpenSSL can also report a
         // rejected certificate as an I/O error naming it.
         ureq::Error::Io(detail) if looks_like_tls(&detail.to_string()) => tls(detail),

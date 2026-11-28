@@ -20,7 +20,7 @@ const ATTEMPTS: u32 = 3;
 pub struct Download<'a> {
     pub url: &'a str,
     pub user_agent: &'a str,
-    /// Optional request headers sent only to the initial download URL's host.
+    /// Optional request headers sent only to the initial download's HTTPS origin.
     pub headers: &'a [(&'a str, &'a str)],
     /// The file's size, when known in advance; the download stops there.
     pub size: Option<u64>,
@@ -96,21 +96,17 @@ fn piece(
     let agent = super::agent(url, |config| {
         config
             .https_only(true)
-            .max_redirects(10)
             .timeout_recv_response(Some(Duration::from_secs(60)))
             .timeout_recv_body(Some(PIECE_TIME))
     });
-    let mut request = agent
-        .get(url)
-        .header("User-Agent", download.user_agent)
-        .header("Range", format!("bytes={have}-{end}"));
-    if !download.headers.is_empty() && super::host(url) == super::host(download.url) {
-        for (name, value) in download.headers {
-            request = request.header(*name, *value);
-        }
-    }
-    let response = request.call();
-    let mut response = match response {
+    let range = format!("bytes={have}-{end}");
+    let response = super::get_following_redirects(
+        &agent,
+        url,
+        &[("User-Agent", download.user_agent), ("Range", &range)],
+        super::ScopedHeaders::new(download.url, download.headers),
+    );
+    let (final_url, mut response) = match response {
         Ok(response) => response,
         // A range past the end: the file is already whole.
         Err(ureq::Error::StatusCode(416)) if have > 0 && download.size.is_none() => {
@@ -118,7 +114,6 @@ fn piece(
         }
         Err(error) => return Err(eyre!(super::unreachable(download.url, &error))),
     };
-    let final_url = ureq::ResponseExt::get_uri(&response).to_string();
     let status = response.status().as_u16();
     let mut file = match status {
         206 => {
@@ -180,5 +175,5 @@ fn piece(
     if download.size.is_none() && written < end + 1 {
         return Ok(Piece::Done);
     }
-    Ok(Piece::More(final_url))
+    Ok(Piece::More(final_url.into()))
 }
