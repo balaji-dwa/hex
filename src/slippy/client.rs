@@ -16,7 +16,7 @@ pub(crate) enum Origin {
     Annotate,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Status {
     Queued,
@@ -42,7 +42,7 @@ impl Status {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Task {
     pub ts: String,
@@ -54,14 +54,14 @@ pub(crate) struct Task {
     pub updated_at: u64,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Role {
     User,
     Assistant,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AttachmentMeta {
     pub id: String,
@@ -69,7 +69,7 @@ pub(crate) struct AttachmentMeta {
     pub mime_type: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Message {
     pub ts: String,
     pub role: Role,
@@ -118,7 +118,7 @@ pub(super) struct Listed {
     pub tasks: Vec<Task>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Detail {
     pub task: Task,
     pub messages: Vec<Message>,

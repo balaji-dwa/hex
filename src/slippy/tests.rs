@@ -1220,28 +1220,38 @@ fn an_upload_seeds_the_cache_so_its_thread_never_downloads_it() {
     barrier(&worker.handle);
     assert_eq!(downloads(), 0);
 
-    // Hex quits (the folder stays) and starts again: still nothing to download.
+    // Hex quits (the folder stays) and starts again: selecting it populates
+    // both its thread detail and thumbnail straight from disk, with zero
+    // network calls for detail or files.
     let kept = dir.0.join("kept");
     copy_dir(&folder, &kept);
     worker.stop_and_join();
     assert!(!folder.exists(), "stopping (sign-out) deletes the folder");
     copy_dir(&kept, &folder);
+    let details_before = server
+        .requests()
+        .iter()
+        .filter(|request| request.path == format!("/api/hex/tasks/{ts}"))
+        .count();
     let worker = Worker::start(server.client(&dir.0), MEMBER, true, Arc::new(|| {})).unwrap();
     wait_until("the reload", || worker.handle.snapshot().tasks.len() == 1);
     worker.handle.select(ts.into());
-    wait_until("the thumbnail from disk", || {
-        worker
-            .handle
-            .snapshot()
-            .thumbs
-            .get(&key)
-            .is_some_and(Option::is_some)
-    });
-    assert_eq!(worker.handle.snapshot().thumbs[&key], Some(thumb));
+    let immediate = worker.handle.snapshot();
+    assert!(
+        matches!(immediate.detail, Some(Ok(ref detail)) if detail.task.ts == ts),
+        "cached detail should appear synchronously on select"
+    );
+    assert_eq!(immediate.thumbs.get(&key), Some(&Some(thumb)));
     worker.handle.open_preview(key.clone());
     assert!(worker.handle.snapshot().preview_image.is_some());
     barrier(&worker.handle);
     assert_eq!(downloads(), 0);
+    let details_after = server
+        .requests()
+        .iter()
+        .filter(|request| request.path == format!("/api/hex/tasks/{ts}"))
+        .count();
+    assert_eq!(details_after, details_before);
     worker.stop_and_join();
     assert!(!folder.exists());
 }

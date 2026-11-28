@@ -14,11 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::client::{FILE_BYTES, valid_file_id, valid_ts};
+use super::client::{Detail, FILE_BYTES, Role, valid_file_id, valid_ts};
+use super::sync::FileKey;
 
 /// The folder's largest total size before the least recently used go.
 pub(super) const CAP: u64 = 50 * 1024 * 1024;
-const KINDS: [&str; 3] = ["img", "thumb", "sent"];
+const KINDS: [&str; 4] = ["img", "thumb", "sent", "detail"];
 
 pub(super) struct DiskCache {
     dir: PathBuf,
@@ -97,8 +98,78 @@ impl DiskCache {
         }
     }
 
+    /// A thread's last cached detail JSON, so switching to it after a restart
+    /// shows its messages and cached thumbnails before any network call.
+    pub(super) fn detail(&self, ts: &str) -> Option<Detail> {
+        let bytes = read(&self.detail_path(ts)?)?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Saves `detail` beside its attachments.
+    pub(super) fn store_detail(&self, detail: &Detail) {
+        let Some(path) = self.detail_path(&detail.task.ts) else {
+            return;
+        };
+        let Ok(bytes) = serde_json::to_vec(detail) else {
+            return;
+        };
+        if self.ensure() {
+            let _ = crate::durable::write_private(&path, &bytes);
+            self.prune();
+        }
+    }
+
+    /// Claims any staged uploads belonging to `detail` and loads every
+    /// thumbnail already present on disk. Never touches the network.
+    pub(super) fn local_thumbs(&self, detail: &Detail) -> Vec<(FileKey, Arc<[u8]>)> {
+        let is_image = |file: &&super::AttachmentMeta| file.mime_type.starts_with("image/");
+        let sent: Vec<&str> = detail
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User)
+            .into_iter()
+            .flat_map(|message| message.files.iter().filter(is_image))
+            .map(|file| file.id.as_str())
+            .collect();
+        let mut found = Vec::new();
+        for file in detail
+            .messages
+            .iter()
+            .flat_map(|message| &message.files)
+            .filter(is_image)
+        {
+            if let Some(index) = sent.iter().position(|id| *id == file.id) {
+                self.claim(&detail.task.ts, index, &file.id);
+            }
+            if let Some(thumb) = self.thumb(&detail.task.ts, &file.id) {
+                found.push(((detail.task.ts.clone(), file.id.clone()), thumb));
+            }
+        }
+        found
+    }
+
+    /// Whether every image attachment in `detail` already has a thumbnail on disk.
+    pub(super) fn has_all_thumbs(&self, detail: &Detail) -> bool {
+        detail
+            .messages
+            .iter()
+            .flat_map(|message| &message.files)
+            .filter(|file| file.mime_type.starts_with("image/"))
+            .all(|file| {
+                self.path(&detail.task.ts, &file.id, "thumb")
+                    .is_some_and(|path| path.is_file())
+                    || self
+                        .path(&detail.task.ts, &file.id, "img")
+                        .is_some_and(|path| path.is_file())
+            })
+    }
+
     pub(super) fn clear(&self) {
         let _ = fs::remove_dir_all(&self.dir);
+    }
+
+    fn detail_path(&self, ts: &str) -> Option<PathBuf> {
+        valid_ts(ts).then(|| self.dir.join(format!("{}.detail", ts.replace('.', "_"))))
     }
 
     fn path(&self, ts: &str, file_id: &str, kind: &str) -> Option<PathBuf> {

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::cache::DiskCache;
 use super::client::{Attachment, Client, Detail, Error, Origin, Role, Task};
@@ -18,6 +18,8 @@ pub(super) const MAX_IMAGES: usize = 64;
 /// Thread details kept in memory, so selecting a thread again shows it at
 /// once and asks again only once its `seq` moves.
 pub(super) const MAX_DETAILS: usize = 64;
+/// Newest tasks pre-warmed into the disk cache while the Slippy pane is open.
+const PREWARM_LIMIT: usize = 12;
 /// Polls a finished task waits for its detail to catch up with the list
 /// before it notifies with what the detail has.
 const LAG_RETRIES: u8 = 3;
@@ -279,26 +281,67 @@ impl Handle {
         Ok(receiver)
     }
 
-    /// Selects thread `ts`, showing its last detail at once while the
-    /// worker checks it is current.
+    /// Selects thread `ts`, showing its cached detail and thumbnails at once
+    /// (from memory or disk) without waiting behind a network poll.
     pub(crate) fn select(&self, ts: String) {
+        let started = Instant::now();
+        let cached = {
+            let state = self.shared.state.lock().unwrap();
+            state.details.get(&ts).cloned()
+        }
+        .or_else(|| self.shared.cache.detail(&ts));
+        let local_thumbs = cached
+            .as_ref()
+            .map(|detail| self.shared.cache.local_thumbs(detail))
+            .unwrap_or_default();
+        let detail_cached = cached.is_some();
+        let thumbs_cached = local_thumbs.len();
         self.shared.update(|state| {
             state.unread.remove(&ts);
+            if let Some(detail) = &cached {
+                remember(state, detail.clone());
+            }
+            for (key, thumb) in local_thumbs {
+                state.thumbs.insert(key, Some(thumb));
+            }
             let same = state.selection.as_deref() == Some(&ts);
             if !same {
                 state.detail = state.details.get(&ts).cloned().map(Ok);
-                state.selection = Some(ts);
+                state.selection = Some(ts.clone());
                 state.preview = None;
+            } else if state.detail.is_none()
+                && let Some(detail) = state.details.get(&ts).cloned()
+            {
+                state.detail = Some(Ok(detail));
             }
         });
+        tracing::info!(
+            target: "hex::slippy",
+            ts = %ts,
+            detail_cached,
+            thumbs_cached,
+            ms = started.elapsed().as_millis() as u64,
+            "Slippy select"
+        );
         let _ = self.send(Command::Select);
     }
 
     /// Opens attachment `key` full-size: from this Mac's cache at once, or
     /// downloaded by the worker.
     pub(crate) fn open_preview(&self, key: FileKey) {
+        let started = Instant::now();
         let bytes = self.shared.cache.full(&key.0, &key.1);
+        let size = bytes.as_ref().map_or(0, |data| data.len());
         let missing = bytes.is_none();
+        tracing::info!(
+            target: "hex::slippy",
+            ts = %key.0,
+            file = %key.1,
+            source = if missing { "download" } else { "disk" },
+            bytes = size,
+            ms = started.elapsed().as_millis() as u64,
+            "Slippy preview open"
+        );
         self.shared
             .update(|state| state.preview = Some((key, bytes)));
         if missing {
@@ -398,12 +441,36 @@ fn run(shared: &Shared, client: &Client, path: &Path, commands: Receiver<Command
     // post before the permission prompt was answered.
     super::notify::authorize();
     let mut cursor = Cursor::load(path);
+    let mut prewarmed: HashSet<(String, u64)> = HashSet::new();
+    let mut pending: VecDeque<Command> = VecDeque::new();
     poll(shared, client, path, &mut cursor);
     while !shared.cancelled.load(Ordering::Acquire) {
-        let command = match commands.recv_timeout(shared.interval()) {
-            Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
-            Ok(command) => command,
-            Err(RecvTimeoutError::Timeout) => Command::Poll,
+        while let Ok(command) = commands.try_recv() {
+            enqueue(&mut pending, command);
+        }
+        let command = match pending.pop_front() {
+            Some(command) => command,
+            None => {
+                if let Some((ts, seq)) = next_prewarm(shared, &prewarmed) {
+                    prewarmed.insert((ts.clone(), seq));
+                    prewarm_one(shared, client, &ts, &commands, &mut pending);
+                    continue;
+                }
+                match commands.recv_timeout(shared.interval()) {
+                    Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
+                    Ok(command) => {
+                        enqueue(&mut pending, command);
+                        while let Ok(more) = commands.try_recv() {
+                            enqueue(&mut pending, more);
+                        }
+                        match pending.pop_front() {
+                            Some(next) => next,
+                            None => continue,
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => Command::Poll,
+                }
+            }
         };
         if shared.cancelled.load(Ordering::Acquire) || shared.state.lock().unwrap().needs_reauth {
             return;
@@ -448,6 +515,133 @@ fn run(shared: &Shared, client: &Client, path: &Path, commands: Receiver<Command
             }
         }
     }
+}
+
+/// Keeps user actions (`Select`, `Preview`, `Submit`, `Reply`) ahead of
+/// background `Poll`s and collapses redundant queued `Poll`/`Select` commands.
+fn enqueue(pending: &mut VecDeque<Command>, command: Command) {
+    match command {
+        Command::Stop => pending.push_front(Command::Stop),
+        Command::Poll => {
+            if !pending
+                .iter()
+                .any(|queued| matches!(queued, Command::Poll | Command::Refresh))
+            {
+                pending.push_back(Command::Poll);
+            }
+        }
+        Command::Select => {
+            if pending
+                .iter()
+                .any(|queued| matches!(queued, Command::Select))
+            {
+                return;
+            }
+            let pos = pending
+                .iter()
+                .position(|queued| matches!(queued, Command::Poll))
+                .unwrap_or(pending.len());
+            pending.insert(pos, Command::Select);
+        }
+        Command::Preview => {
+            let pos = pending
+                .iter()
+                .position(|queued| matches!(queued, Command::Poll))
+                .unwrap_or(pending.len());
+            pending.insert(pos, Command::Preview);
+        }
+        other => pending.push_back(other),
+    }
+}
+
+/// Picks the newest recent task whose detail or thumbnails are not yet cached
+/// on disk, only while the Slippy pane is open.
+fn next_prewarm(shared: &Shared, tried: &HashSet<(String, u64)>) -> Option<(String, u64)> {
+    if !shared.pane.load(Ordering::Acquire) {
+        return None;
+    }
+    let candidates: Vec<(String, u64)> = {
+        let state = shared.state.lock().unwrap();
+        let mut tasks: Vec<_> = state.tasks.values().collect();
+        tasks.sort_by(|a, b| (&b.updated_at, &b.ts).cmp(&(&a.updated_at, &a.ts)));
+        tasks
+            .into_iter()
+            .take(PREWARM_LIMIT)
+            .filter(|task| !tried.contains(&(task.ts.clone(), task.seq)))
+            .map(|task| (task.ts.clone(), task.seq))
+            .collect()
+    };
+    for (ts, seq) in candidates {
+        let cached = {
+            let state = shared.state.lock().unwrap();
+            state.details.get(&ts).cloned()
+        }
+        .or_else(|| shared.cache.detail(&ts));
+        let fresh = cached
+            .as_ref()
+            .is_some_and(|detail| detail.task.seq >= seq && shared.cache.has_all_thumbs(detail));
+        if !fresh {
+            return Some((ts, seq));
+        }
+    }
+    None
+}
+
+fn prewarm_one(
+    shared: &Shared,
+    client: &Client,
+    ts: &str,
+    commands: &Receiver<Command>,
+    pending: &mut VecDeque<Command>,
+) {
+    let started = Instant::now();
+    let cached = {
+        let state = shared.state.lock().unwrap();
+        current(&state, ts)
+    }
+    .or_else(|| {
+        let detail = shared.cache.detail(ts)?;
+        let fresh = shared
+            .state
+            .lock()
+            .unwrap()
+            .tasks
+            .get(ts)
+            .is_none_or(|task| detail.task.seq >= task.seq);
+        fresh.then_some(detail)
+    });
+    let detail = match cached {
+        Some(detail) => detail,
+        None => match client.detail(ts) {
+            Ok(detail) => {
+                shared.cache.store_detail(&detail);
+                shared.update(|state| remember(state, detail.clone()));
+                detail
+            }
+            Err(Error::Auth(AuthError::Refresh)) => {
+                report(shared, Error::Auth(AuthError::Refresh));
+                return;
+            }
+            Err(_) => return,
+        },
+    };
+    // Yield right away if the user clicked another task or opened a preview.
+    while let Ok(command) = commands.try_recv() {
+        enqueue(pending, command);
+    }
+    if pending
+        .iter()
+        .any(|command| !matches!(command, Command::Poll))
+    {
+        return;
+    }
+    thumbs(shared, client, &detail);
+    tracing::info!(
+        target: "hex::slippy",
+        ts = %ts,
+        ms = started.elapsed().as_millis() as u64,
+        "Slippy prewarmed task"
+    );
 }
 
 fn finish(shared: &Shared, result: Result<Task, Error>, answer: Answer) {
@@ -497,11 +691,22 @@ fn detail(shared: &Shared, client: &Client, force: bool) {
             Some(detail)
         }
         None => {
+            let started = Instant::now();
             let result = client.detail(&ts);
+            tracing::info!(
+                target: "hex::slippy",
+                ts = %ts,
+                ok = result.is_ok(),
+                ms = started.elapsed().as_millis() as u64,
+                "Slippy detail fetched"
+            );
             if result == Err(Error::Auth(AuthError::Refresh)) {
                 report(shared, Error::Auth(AuthError::Refresh));
             }
             let loaded = result.as_ref().ok().cloned();
+            if let Some(detail) = &loaded {
+                shared.cache.store_detail(detail);
+            }
             shared.update(|state| {
                 if let Ok(detail) = &result {
                     remember(state, detail.clone());
@@ -598,12 +803,36 @@ fn thumbs(shared: &Shared, client: &Client, detail: &Detail) {
         if let Some(index) = sent.iter().position(|id| *id == key.1) {
             shared.cache.claim(&key.0, index, &key.1);
         }
+        let started = Instant::now();
         if let Some(thumb) = shared.cache.thumb(&key.0, &key.1) {
+            tracing::info!(
+                target: "hex::slippy",
+                ts = %key.0,
+                file = %key.1,
+                source = "disk",
+                bytes = thumb.len(),
+                ms = started.elapsed().as_millis() as u64,
+                "Slippy thumbnail ready"
+            );
             shared.update(|state| state.thumbs.insert(key, Some(thumb)));
             continue;
         }
         let thumb = match download(shared, client, &key) {
-            Ok(Some(bytes)) => Some(shared.cache.store(&key.0, &key.1, &bytes)),
+            Ok(Some(bytes)) => {
+                let raw_bytes = bytes.len();
+                let thumb = shared.cache.store(&key.0, &key.1, &bytes);
+                tracing::info!(
+                    target: "hex::slippy",
+                    ts = %key.0,
+                    file = %key.1,
+                    source = "download",
+                    raw_bytes,
+                    thumb_bytes = thumb.len(),
+                    ms = started.elapsed().as_millis() as u64,
+                    "Slippy thumbnail ready"
+                );
+                Some(thumb)
+            }
             Ok(None) => None,
             Err(()) => return,
         };
@@ -817,9 +1046,14 @@ fn settle(
     let status_changed = previous
         .as_ref()
         .is_none_or(|previous| previous.status != task.status);
+    shared.cache.store_detail(&detail);
+    let local_thumbs = shared.cache.local_thumbs(&detail);
     let mut notify = status_changed;
     shared.update(|state| {
         remember(state, detail.clone());
+        for (key, thumb) in local_thumbs {
+            state.thumbs.insert(key, Some(thumb));
+        }
         if let Some(reply) = reply {
             let answered = match state.replies.get(&task.ts) {
                 Some(seen) => *seen != reply.ts,
