@@ -194,8 +194,32 @@ commit="$(git -C "$root" rev-parse HEAD)"
 published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [[ "$skip_checks" -eq 0 ]]; then
-  "$root/scripts/test-app-identity.sh"
-  "$root/scripts/check" updater:: dev_build:: labs:: app_paths::
+  env \
+    -u HEX_APP_NAME \
+    -u HEX_BUILD_CHANNEL \
+    -u HEX_BUILD_NUMBER \
+    -u HEX_DEV_NOTES_PAGE \
+    -u HEX_DEV_NOTES_URL \
+    -u HEX_LOCAL_BUILD \
+    -u HEX_RELEASE_DOWNLOAD_URL \
+    -u HEX_RELEASE_ORIGIN \
+    -u HEX_TEST_BUILD \
+    -u HEX_UPDATE_TEAM_ID \
+    -u HEX_VERSION \
+    "$root/scripts/test-app-identity.sh"
+  env \
+    -u HEX_APP_NAME \
+    -u HEX_BUILD_CHANNEL \
+    -u HEX_BUILD_NUMBER \
+    -u HEX_DEV_NOTES_PAGE \
+    -u HEX_DEV_NOTES_URL \
+    -u HEX_LOCAL_BUILD \
+    -u HEX_RELEASE_DOWNLOAD_URL \
+    -u HEX_RELEASE_ORIGIN \
+    -u HEX_TEST_BUILD \
+    -u HEX_UPDATE_TEAM_ID \
+    -u HEX_VERSION \
+    "$root/scripts/check" updater:: dev_build:: labs:: app_paths::
 fi
 
 unset HEX_LOCAL_BUILD HEX_TEST_BUILD HEX_RELEASE_UNSIGNED HEX_COMMIT
