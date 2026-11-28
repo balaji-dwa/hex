@@ -550,7 +550,7 @@ const EXPECTED_DRIVER_BUNDLE_ID: &str = "anomaly.hex.microphone.driver";
 /// requires of `Hex.app`, minus `notarized`, since notarization is the
 /// app's and a nested plug-in has no ticket of its own. The release build
 /// signs the driver with the same identity it signs `Hex.app` with.
-const DRIVER_REQUIREMENT: &str = include_str!("../../app/driver-requirement.txt");
+const DRIVER_REQUIREMENT: &str = env!("HEX_DRIVER_REQUIREMENT");
 
 /// Fixed AppleScript for driver installation. Nothing from the machine is
 /// interpolated into the script: `osascript` receives the bundled `.driver`

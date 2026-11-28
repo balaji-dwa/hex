@@ -7,6 +7,7 @@ fn main() {
     let version = build_version();
     println!("cargo:rustc-env=HEX_BUILD_VERSION={version}");
     build_commit(&version);
+    build_release_config();
     // `hex_dev_onboarding`: the first run's replay strip and its swearing
     // jokes, in debug and `HEX_TEST_BUILD=1` builds only.
     println!("cargo::rustc-check-cfg=cfg(hex_dev_onboarding)");
@@ -305,6 +306,72 @@ fn build_commit(version: &str) {
             .filter(|path| std::path::Path::new(path).exists())
         {
             println!("cargo:rerun-if-changed={path}");
+        }
+    }
+}
+
+fn build_release_config() {
+    const UPSTREAM_TEAM_NEEDLE: &str = "subject.OU] = \"5NZ4Q7NXJ4\"";
+    println!("cargo:rerun-if-changed=app/update-requirement.txt");
+    println!("cargo:rerun-if-changed=app/driver-requirement.txt");
+    println!("cargo:rerun-if-env-changed=HEX_UPDATE_TEAM_ID");
+
+    let team_id = std::env::var("HEX_UPDATE_TEAM_ID")
+        .ok()
+        .filter(|value| !value.is_empty());
+    if let Some(team) = team_id.as_deref() {
+        assert!(
+            team.len() == 10
+                && team
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()),
+            "HEX_UPDATE_TEAM_ID must be a 10-character uppercase alphanumeric Apple Team ID, got {team:?}"
+        );
+    }
+    for (path, env_name) in [
+        ("app/update-requirement.txt", "HEX_UPDATE_REQUIREMENT"),
+        ("app/driver-requirement.txt", "HEX_DRIVER_REQUIREMENT"),
+    ] {
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("could not read {path}: {error}"));
+        let trimmed = raw.trim();
+        let requirement = match team_id.as_deref() {
+            Some(team) => {
+                assert!(
+                    trimmed.contains(UPSTREAM_TEAM_NEEDLE),
+                    "{path} no longer contains expected team pin `{UPSTREAM_TEAM_NEEDLE}`"
+                );
+                trimmed.replace(UPSTREAM_TEAM_NEEDLE, &format!("subject.OU] = \"{team}\""))
+            }
+            None => trimmed.to_owned(),
+        };
+        println!("cargo:rustc-env={env_name}={requirement}");
+    }
+
+    for (source_env, target_env) in [
+        ("HEX_RELEASE_ORIGIN", "HEX_BUILD_RELEASE_ORIGIN"),
+        ("HEX_RELEASE_DOWNLOAD_URL", "HEX_BUILD_RELEASE_DOWNLOAD_URL"),
+        ("HEX_DEV_NOTES_URL", "HEX_BUILD_DEV_NOTES_URL"),
+        ("HEX_DEV_NOTES_PAGE", "HEX_BUILD_DEV_NOTES_PAGE"),
+    ] {
+        println!("cargo:rerun-if-env-changed={source_env}");
+        if let Some(raw) = std::env::var(source_env)
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            let trimmed = raw.trim_end_matches('/');
+            let rest = trimmed
+                .strip_prefix("https://")
+                .unwrap_or_else(|| panic!("{source_env} must start with https://, got {raw:?}"));
+            let host = rest.split('/').next().unwrap_or_default();
+            assert!(
+                !host.is_empty()
+                    && !trimmed
+                        .chars()
+                        .any(|ch| ch.is_whitespace() || ch.is_control()),
+                "{source_env} must be a valid HTTPS URL without whitespace or control characters, got {raw:?}"
+            );
+            println!("cargo:rustc-env={target_env}={trimmed}");
         }
     }
 }

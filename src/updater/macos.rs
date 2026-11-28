@@ -28,7 +28,7 @@ const BUNDLE_ID: &str = "anomaly.hex";
 /// A Developer ID application from Anomaly's team (5NZ4Q7NXJ4), identified
 /// as `anomaly.hex`, and notarized. The release build checks its artifacts
 /// against the same file.
-const REQUIREMENT: &str = include_str!("../../app/update-requirement.txt");
+const REQUIREMENT: &str = env!("HEX_UPDATE_REQUIREMENT");
 
 /// An unpacked, verified bundle and the installed bundle it replaces.
 #[derive(Clone, Debug)]

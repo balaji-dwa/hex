@@ -13,8 +13,14 @@ use serde_json::Value;
 use super::transport::ManifestCache;
 use crate::desktop::host::UpdateNotes;
 
-const URL: &str = "https://anoma.ly/hex/files/dev-notes.json";
-const PAGE: &str = "https://anoma.ly/hex/dev";
+const URL: &str = match option_env!("HEX_BUILD_DEV_NOTES_URL") {
+    Some(url) => url,
+    None => "https://anoma.ly/hex/files/dev-notes.json",
+};
+const PAGE: &str = match option_env!("HEX_BUILD_DEV_NOTES_PAGE") {
+    Some(url) => url,
+    None => "https://anoma.ly/hex/dev",
+};
 /// A stable release's notes, as the release workflow links them (`plan.sh`).
 const RELEASES: &str = "https://github.com/anomalyco/hex/releases/tag";
 const TIMEOUT: Duration = Duration::from_secs(30);

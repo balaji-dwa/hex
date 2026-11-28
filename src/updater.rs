@@ -47,7 +47,14 @@ pub(crate) use presentation::{UpdateOffer, offer, offer_hold};
 
 const APP: &str = "hex";
 const ARTIFACT: &str = "desktop";
-const ORIGIN: &str = "https://anoma.ly/release";
+const ORIGIN: &str = match option_env!("HEX_BUILD_RELEASE_ORIGIN") {
+    Some(url) => url,
+    None => "https://anoma.ly/release",
+};
+const DOWNLOAD_FALLBACK_URL: &str = match option_env!("HEX_BUILD_RELEASE_DOWNLOAD_URL") {
+    Some(url) => url,
+    None => "https://anoma.ly/hex",
+};
 const STARTUP_DELAY: Duration = Duration::from_secs(10);
 const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Dev builds land on every push to dev, so the Dev channel checks often.
@@ -865,7 +872,7 @@ fn check(
         } => Ok(Phase::Available(match command {
             Some(command) => Available::Command { command },
             None => Available::Download {
-                url: notes_url.unwrap_or_else(|| "https://anoma.ly/hex".into()),
+                url: notes_url.unwrap_or_else(|| DOWNLOAD_FALLBACK_URL.into()),
             },
         })),
         Decision::Install {
@@ -893,7 +900,7 @@ fn check(
                             .and_then(|target| protocol::resolve_url(&manifest_url, &target.url))
                             .or(manifest.release.notes_url)
                     })
-                    .unwrap_or_else(|| "https://anoma.ly/hex".into());
+                    .unwrap_or_else(|| DOWNLOAD_FALLBACK_URL.into());
                 return Ok(Phase::Available(Available::Download { url }));
             }
             let url = protocol::resolve_url(&manifest_url, &target.url)
