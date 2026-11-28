@@ -390,6 +390,36 @@ fn build_release_config() {
             println!("cargo:rustc-env={target_env}={trimmed}");
         }
     }
+
+    println!("cargo:rerun-if-env-changed=HEX_RELEASE_CF_ACCESS_CLIENT_ID");
+    println!("cargo:rerun-if-env-changed=HEX_RELEASE_CF_ACCESS_CLIENT_SECRET");
+    let cf_id = std::env::var("HEX_RELEASE_CF_ACCESS_CLIENT_ID")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let cf_secret = std::env::var("HEX_RELEASE_CF_ACCESS_CLIENT_SECRET")
+        .ok()
+        .filter(|value| !value.is_empty());
+    match (cf_id.as_deref(), cf_secret.as_deref()) {
+        (Some(id), Some(secret)) => {
+            for (name, value) in [
+                ("HEX_RELEASE_CF_ACCESS_CLIENT_ID", id),
+                ("HEX_RELEASE_CF_ACCESS_CLIENT_SECRET", secret),
+            ] {
+                assert!(
+                    !value
+                        .chars()
+                        .any(|ch| ch.is_whitespace() || ch.is_control()),
+                    "{name} must not contain whitespace or control characters"
+                );
+            }
+            println!("cargo:rustc-env=HEX_BUILD_CF_ACCESS_CLIENT_ID={id}");
+            println!("cargo:rustc-env=HEX_BUILD_CF_ACCESS_CLIENT_SECRET={secret}");
+        }
+        (None, None) => {}
+        _ => panic!(
+            "HEX_RELEASE_CF_ACCESS_CLIENT_ID and HEX_RELEASE_CF_ACCESS_CLIENT_SECRET must either both be set or both be unset"
+        ),
+    }
 }
 
 /// Gives the executable its icon and the "Hex" name Explorer and Task

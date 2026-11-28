@@ -20,6 +20,8 @@ const ATTEMPTS: u32 = 3;
 pub struct Download<'a> {
     pub url: &'a str,
     pub user_agent: &'a str,
+    /// Optional request headers sent only to the initial download URL's host.
+    pub headers: &'a [(&'a str, &'a str)],
     /// The file's size, when known in advance; the download stops there.
     pub size: Option<u64>,
     pub canceled: Option<&'a AtomicBool>,
@@ -98,11 +100,16 @@ fn piece(
             .timeout_recv_response(Some(Duration::from_secs(60)))
             .timeout_recv_body(Some(PIECE_TIME))
     });
-    let response = agent
+    let mut request = agent
         .get(url)
         .header("User-Agent", download.user_agent)
-        .header("Range", format!("bytes={have}-{end}"))
-        .call();
+        .header("Range", format!("bytes={have}-{end}"));
+    if !download.headers.is_empty() && super::host(url) == super::host(download.url) {
+        for (name, value) in download.headers {
+            request = request.header(*name, *value);
+        }
+    }
+    let response = request.call();
     let mut response = match response {
         Ok(response) => response,
         // A range past the end: the file is already whole.

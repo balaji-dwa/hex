@@ -36,6 +36,10 @@ secrets live in macOS Keychain (`hex-notary` for Apple notarization), `~/.aws/cr
 
 Compare `git rev-parse HEAD` on clean `dev` against the latest published commit in
 `<HEX_RELEASE_ORIGIN>/hex/files/dev-notes.json` (first entry of `builds[0].commit`).
+The release host is protected by Cloudflare Zero Trust; source `~/.config/hex/team-release.env`
+and pass `-H "CF-Access-Client-Id: $HEX_RELEASE_CF_ACCESS_CLIENT_ID"` and
+`-H "CF-Access-Client-Secret: $HEX_RELEASE_CF_ACCESS_CLIENT_SECRET"` when fetching
+`dev-notes.json`.
 - If `HEAD` matches the already-published commit (and this is a scheduled check), report
   that the team feed is already up to date and exit without rebuilding.
 - If `HEAD` is newer (either from a fresh upstream merge or your own new commits on `dev`),

@@ -87,10 +87,21 @@ require_r2() {
   command -v aws >/dev/null 2>&1 || { echo "aws CLI is required for R2 uploads." >&2; exit 1; }
 }
 
+curl_release() {
+  local headers=()
+  if [[ -n "${HEX_RELEASE_CF_ACCESS_CLIENT_ID:-}" && -n "${HEX_RELEASE_CF_ACCESS_CLIENT_SECRET:-}" ]]; then
+    headers+=(
+      -H "CF-Access-Client-Id: $HEX_RELEASE_CF_ACCESS_CLIENT_ID"
+      -H "CF-Access-Client-Secret: $HEX_RELEASE_CF_ACCESS_CLIENT_SECRET"
+    )
+  fi
+  curl ${headers[@]+"${headers[@]}"} "$@"
+}
+
 fetch_live_json() {
   local url=$1
   local dest=$2
-  if curl -fsSL --max-time 15 "$url" -o "$dest" 2>/dev/null; then
+  if curl_release -fsSL --max-time 15 "$url" -o "$dest" 2>/dev/null; then
     return 0
   fi
   rm -f "$dest"
@@ -117,7 +128,7 @@ verify_remote_artifact() {
   local url=$1
   local expected_size=$2
   local headers
-  headers="$(curl -fsSI --max-time 30 "$url")"
+  headers="$(curl_release -fsSI --max-time 30 "$url")"
   local remote_size
   remote_size="$(printf '%s\n' "$headers" | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub(/\r/, "", $2); print $2; exit}')"
   if [[ "$remote_size" != "$expected_size" ]]; then
@@ -156,7 +167,7 @@ if [[ -n "$rollback_manifest" ]]; then
     --content-type "application/json; charset=utf-8" \
     --cache-control "no-cache" \
     --only-show-errors
-  live_version="$(curl -fsSL "$origin/hex/desktop/$channel.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"]["version"])')"
+  live_version="$(curl_release -fsSL "$origin/hex/desktop/$channel.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"]["version"])')"
   [[ "$live_version" == "$target_version" ]] || { echo "Rollback verification failed: live version is $live_version" >&2; exit 1; }
   echo "Rolled back $channel channel to $target_version (sequence $next_seq)."
   exit 0
@@ -201,6 +212,8 @@ if [[ "$skip_checks" -eq 0 ]]; then
     -u HEX_DEV_NOTES_PAGE \
     -u HEX_DEV_NOTES_URL \
     -u HEX_LOCAL_BUILD \
+    -u HEX_RELEASE_CF_ACCESS_CLIENT_ID \
+    -u HEX_RELEASE_CF_ACCESS_CLIENT_SECRET \
     -u HEX_RELEASE_DOWNLOAD_URL \
     -u HEX_RELEASE_ORIGIN \
     -u HEX_TEST_BUILD \
@@ -214,6 +227,8 @@ if [[ "$skip_checks" -eq 0 ]]; then
     -u HEX_DEV_NOTES_PAGE \
     -u HEX_DEV_NOTES_URL \
     -u HEX_LOCAL_BUILD \
+    -u HEX_RELEASE_CF_ACCESS_CLIENT_ID \
+    -u HEX_RELEASE_CF_ACCESS_CLIENT_SECRET \
     -u HEX_RELEASE_DOWNLOAD_URL \
     -u HEX_RELEASE_ORIGIN \
     -u HEX_TEST_BUILD \
@@ -239,8 +254,11 @@ bundle="$("$root/scripts/build-app.sh")"
 
 out_dir="$root/dist/team-release/$version"
 mkdir -p "$out_dir"
-dmg="$out_dir/Hex.dmg"
-zip="$out_dir/Hex.zip"
+artifact_stem="${app_name// /-}"
+dmg_name="${artifact_stem}.dmg"
+zip_name="${artifact_stem}.zip"
+dmg="$out_dir/$dmg_name"
+zip="$out_dir/$zip_name"
 rm -f "$dmg" "$zip"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/hex-team-release.XXXXXX")"
@@ -279,6 +297,8 @@ python3 "$manifest_py" build \
   --sequence "$next_seq" \
   --zip "$zip" \
   --dmg "$dmg" \
+  --zip-name "$zip_name" \
+  --dmg-name "$dmg_name" \
   --notes-url "$origin/hex/dev" \
   --published-at "$published_at" \
   --out "$manifest_out"
@@ -321,26 +341,26 @@ dmg_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rele
 zip_size="$(stat -f%z "$zip")"
 dmg_size="$(stat -f%z "$dmg")"
 
-upload_immutable_if_missing "$zip" "hex/files/$zip_sha/Hex.zip"
-upload_immutable_if_missing "$dmg" "hex/files/$dmg_sha/Hex.dmg"
+upload_immutable_if_missing "$zip" "hex/files/$zip_sha/$zip_name"
+upload_immutable_if_missing "$dmg" "hex/files/$dmg_sha/$dmg_name"
 
 aws_r2 s3 cp "$notes_out" "s3://$HEX_R2_BUCKET/hex/files/dev-notes.json" \
   --content-type "application/json; charset=utf-8" \
   --cache-control "no-cache" \
   --only-show-errors
 
-verify_remote_artifact "$origin/hex/files/$zip_sha/Hex.zip" "$zip_size"
-verify_remote_artifact "$origin/hex/files/$dmg_sha/Hex.dmg" "$dmg_size"
+verify_remote_artifact "$origin/hex/files/$zip_sha/$zip_name" "$zip_size"
+verify_remote_artifact "$origin/hex/files/$dmg_sha/$dmg_name" "$dmg_size"
 
 aws_r2 s3 cp "$manifest_out" "s3://$HEX_R2_BUCKET/hex/desktop/$channel.json" \
   --content-type "application/json; charset=utf-8" \
   --cache-control "no-cache" \
   --only-show-errors
 
-live_version="$(curl -fsSL "$origin/hex/desktop/$channel.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"]["version"])')"
+live_version="$(curl_release -fsSL "$origin/hex/desktop/$channel.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"]["version"])')"
 [[ "$live_version" == "$version" ]] || { echo "Live manifest mismatch: expected $version, got $live_version" >&2; exit 1; }
-download_location="$(curl -fsSI --max-time 15 "$origin/download" | awk 'BEGIN{IGNORECASE=1} /^location:/ {gsub(/\r/, "", $2); print $2; exit}')"
-[[ "$download_location" == *"/hex/files/$dmg_sha/Hex.dmg" ]] || {
+download_location="$(curl_release -fsSI --max-time 15 "$origin/download" | awk 'BEGIN{IGNORECASE=1} /^location:/ {gsub(/\r/, "", $2); print $2; exit}')"
+[[ "$download_location" == *"/hex/files/$dmg_sha/$dmg_name" ]] || {
   echo "Download redirect mismatch: got ${download_location:-none}" >&2
   exit 1
 }

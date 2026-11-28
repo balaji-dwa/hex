@@ -116,10 +116,11 @@ async function serveImmutableFile(bucket, sha256, fileName, request) {
     return new Response("Not found\n", { status: 404 });
   }
 
+  const downloadName = fileName === "Slippy-Hex.dmg" ? "Slippy Hex.dmg" : fileName;
   const baseHeaders = new Headers({
     "Accept-Ranges": "bytes",
     "Cache-Control": "public, max-age=31536000, immutable",
-    "Content-Disposition": `attachment; filename="${fileName}"`,
+    "Content-Disposition": `attachment; filename="${downloadName}"`,
     "Content-Type": fileName.endsWith(".zip")
       ? "application/zip"
       : "application/octet-stream",

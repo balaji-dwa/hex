@@ -146,6 +146,21 @@ test("immutable files support full GET, HEAD, open-ended Range, bounded Range, a
   assert.equal(full.headers.get("Content-Disposition"), 'attachment; filename="Hex.zip"');
   assert.match(full.headers.get("Cache-Control"), /immutable/);
 
+  const dmgEnv = {
+    HEX_RELEASES: createMockBucket({
+      [`hex/files/${SAMPLE_DMG_SHA}/Slippy-Hex.dmg`]: Buffer.from("dmg"),
+    }),
+  };
+  const dmgRes = await worker.fetch(
+    new Request(`https://releases.example.com/hex/files/${SAMPLE_DMG_SHA}/Slippy-Hex.dmg`),
+    dmgEnv,
+  );
+  assert.equal(dmgRes.status, 200);
+  assert.equal(
+    dmgRes.headers.get("Content-Disposition"),
+    'attachment; filename="Slippy Hex.dmg"',
+  );
+
   const head = await worker.fetch(new Request(url, { method: "HEAD" }), env);
   assert.equal(head.status, 200);
   assert.equal(head.headers.get("Content-Length"), "10");

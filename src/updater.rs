@@ -47,7 +47,7 @@ pub(crate) use presentation::{UpdateOffer, offer, offer_hold};
 
 const APP: &str = "hex";
 const ARTIFACT: &str = "desktop";
-const ORIGIN: &str = match option_env!("HEX_BUILD_RELEASE_ORIGIN") {
+pub(super) const ORIGIN: &str = match option_env!("HEX_BUILD_RELEASE_ORIGIN") {
     Some(url) => url,
     None => "https://anoma.ly/release",
 };

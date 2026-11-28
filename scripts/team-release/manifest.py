@@ -57,6 +57,8 @@ def build_manifest(
     sequence: int,
     zip_path: pathlib.Path,
     dmg_path: pathlib.Path,
+    zip_name: str = "Hex.zip",
+    dmg_name: str = "Hex.dmg",
     notes_url: str | None = None,
     rollout_percent: int = 100,
     required: bool = False,
@@ -70,6 +72,9 @@ def build_manifest(
         raise ValueError("sequence must be >= 1")
     if not (0 <= rollout_percent <= 100):
         raise ValueError("rollout_percent must be between 0 and 100")
+    for fname in (zip_name, dmg_name):
+        if not is_version_name(fname):
+            raise ValueError(f"Invalid artifact file name {fname!r}")
 
     zip_sha, zip_size = file_digest_and_size(zip_path)
     dmg_sha, dmg_size = file_digest_and_size(dmg_path)
@@ -80,12 +85,12 @@ def build_manifest(
         "required": required,
         "targets": {
             "macos-arm64": {
-                "url": f"/hex/files/{zip_sha}/Hex.zip",
+                "url": f"/hex/files/{zip_sha}/{zip_name}",
                 "size": zip_size,
                 "sha256": zip_sha,
             },
             "macos-arm64-dmg": {
-                "url": f"/hex/files/{dmg_sha}/Hex.dmg",
+                "url": f"/hex/files/{dmg_sha}/{dmg_name}",
                 "size": dmg_size,
                 "sha256": dmg_sha,
             },
@@ -207,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     p_build.add_argument("--sequence", required=True, type=int)
     p_build.add_argument("--zip", dest="zip_path", required=True, type=pathlib.Path)
     p_build.add_argument("--dmg", dest="dmg_path", required=True, type=pathlib.Path)
+    p_build.add_argument("--zip-name", default="Hex.zip")
+    p_build.add_argument("--dmg-name", default="Hex.dmg")
     p_build.add_argument("--out", required=True, type=pathlib.Path)
     p_build.add_argument("--notes-url")
     p_build.add_argument("--rollout-percent", type=int, default=100)
@@ -240,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
             sequence=args.sequence,
             zip_path=args.zip_path,
             dmg_path=args.dmg_path,
+            zip_name=args.zip_name,
+            dmg_name=args.dmg_name,
             notes_url=args.notes_url,
             rollout_percent=args.rollout_percent,
             required=args.required,

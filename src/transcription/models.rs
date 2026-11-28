@@ -830,6 +830,7 @@ fn download_artifact(
         &crate::net::Download {
             url: &url,
             user_agent: &format!("hex/{}", crate::VERSION),
+            headers: &[],
             size: Some(artifact.bytes),
             canceled: Some(canceled),
         },

@@ -20,6 +20,25 @@ pub fn user_agent(channel: &str, version: &str) -> String {
     format!("hex/{channel}/{version}")
 }
 
+const CF_ACCESS_CLIENT_ID: Option<&str> = option_env!("HEX_BUILD_CF_ACCESS_CLIENT_ID");
+const CF_ACCESS_CLIENT_SECRET: Option<&str> = option_env!("HEX_BUILD_CF_ACCESS_CLIENT_SECRET");
+
+/// Optional Cloudflare Access service-token headers, sent only to the compiled
+/// release host over HTTPS.
+fn access_headers(url: &str) -> Vec<(&'static str, &'static str)> {
+    let (Some(id), Some(secret)) = (CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET) else {
+        return Vec::new();
+    };
+    if url.starts_with("https://") && crate::net::host(url) == crate::net::host(super::ORIGIN) {
+        vec![
+            ("CF-Access-Client-Id", id),
+            ("CF-Access-Client-Secret", secret),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The last manifest the service sent, revalidated with its ETag.
 #[derive(Default)]
 pub struct ManifestCache {
@@ -53,6 +72,9 @@ impl ManifestCache {
                 .timeout_global(Some(max_time.max(Duration::from_secs(1))))
         });
         let mut request = agent.get(url).header("User-Agent", user_agent);
+        for (name, value) in access_headers(url) {
+            request = request.header(name, value);
+        }
         if let (Some(etag), Some(_)) = (&self.etag, &self.body) {
             request = request.header("If-None-Match", etag.as_str());
         }
@@ -125,10 +147,12 @@ pub fn download(url: &str, user_agent: &str, target: &Target, directory: &Path) 
     drop(options.open(&partial)?);
     let complete = fs::metadata(&partial)?.len() == target.size;
     if !complete {
+        let headers = access_headers(url);
         crate::net::download(
             &crate::net::Download {
                 url,
                 user_agent,
+                headers: &headers,
                 size: Some(target.size),
                 canceled: None,
             },
