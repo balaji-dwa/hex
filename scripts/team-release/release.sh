@@ -9,8 +9,10 @@ manifest_py="$root/scripts/team-release/manifest.py"
 
 config_file="${HEX_TEAM_RELEASE_CONFIG:-$HOME/.config/hex/team-release.env}"
 if [[ -f "$config_file" ]]; then
+  set -a
   # shellcheck disable=SC1090
   source "$config_file"
+  set +a
 fi
 
 channel="${HEX_BUILD_CHANNEL:-dev}"
